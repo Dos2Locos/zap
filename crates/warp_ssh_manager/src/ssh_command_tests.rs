@@ -29,6 +29,7 @@ fn server() -> SshServerInfo {
         startup_command: None,
         notes: None,
         last_connected_at: None,
+        advanced: Default::default(),
     }
 }
 
