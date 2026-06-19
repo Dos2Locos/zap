@@ -1,0 +1,6 @@
+interface:
+  display_name: "Zap"
+  short_description: "Repo-specific patterns and workflows for zap"
+  default_prompt: "Use the zap repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
