@@ -1,0 +1,410 @@
+# Instincts generated from https://github.com/Dos2Locos/zap
+# Generated: 2026-06-19T08:46:36.358Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: zap-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: docs, fix, feat, test
+
+## Evidence
+
+- 6 commits analyzed
+- Detected conventional commit pattern
+- Examples: fix(ssh_manager): harden command building, secret handling and error paths, docs(agents): translate AGENTS.md to English and set English-only policy
+
+---
+id: zap-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Commit Length
+
+## Action
+
+Write moderate-length commit messages (~68 characters)
+
+## Evidence
+
+- Average commit message length: 68 chars
+- Based on 6 commits
+
+---
+id: zap-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: zap-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: zap-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: zap-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: zap-workflow-update-project-documentation
+trigger: "when doing update project documentation"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Workflow Update Project Documentation
+
+## Action
+
+Follow the update-project-documentation workflow:
+1. Edit the relevant documentation file (e.g., AGENTS.md, PLAN.md) to add translations, update milestones, or change conventions.
+2. Commit the changes with a descriptive message indicating the nature of the documentation update.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: AGENTS.md, specs/ssh-editor-revamp/PLAN.md
+
+---
+id: zap-workflow-extend-ssh-manager-feature
+trigger: "when doing extend ssh manager feature"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Dos2Locos/zap
+---
+
+# Zap Workflow Extend Ssh Manager Feature
+
+## Action
+
+Follow the extend-ssh-manager-feature workflow:
+1. Modify or add Rust source files in crates/warp_ssh_manager/src (e.g., db.rs, repository.rs, types.rs, ssh_command.rs, sync_provider.rs).
+2. Update or add related test files (e.g., ssh_command_tests.rs, server_view_tests.rs).
+3. If persistence changes are needed, update schema.rs and create new migration SQL files.
+4. Update application code to use new or changed features (e.g., app/src/ssh_manager/*).
+5. Run and verify tests.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: crates/warp_ssh_manager/src/*.rs, app/src/ssh_manager/*.rs, crates/persistence/migrations/*.sql
+
+---
+id: zap-instinct-naming-files
+trigger: "When creating or renaming a file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Naming Files
+
+## Action
+
+Use snake_case for file names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files
+
+---
+id: zap-instinct-naming-functions
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Naming Functions
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions
+
+---
+id: zap-instinct-naming-classes
+trigger: "When defining a class or struct"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Naming Classes
+
+## Action
+
+Use PascalCase for class/struct names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes
+
+---
+id: zap-instinct-naming-constants
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Naming Constants
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants
+
+---
+id: zap-instinct-import-style
+trigger: "When importing modules in Rust code"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle
+
+---
+id: zap-instinct-export-style
+trigger: "When exporting modules or items in Rust code"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle
+
+---
+id: zap-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Test Location
+
+## Action
+
+Place test files in a separate test directory
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation
+
+---
+id: zap-instinct-test-update-on-feature
+trigger: "When adding or modifying a feature in crates/warp_ssh_manager/src"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Test Update On Feature
+
+## Action
+
+Update or add related test files (e.g., ssh_command_tests.rs, server_view_tests.rs)
+
+## Evidence
+
+- Workflow: extend-ssh-manager-feature
+- Example commit sequence
+
+---
+id: zap-instinct-git-commit-format
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Git Commit Format
+
+## Action
+
+Use conventional commit format: <type>(<scope>): <description>
+
+## Evidence
+
+- Pattern in commits.type = conventional
+- Examples: fix(ssh_manager): harden command building, ...
+- docs(agents): translate AGENTS.md to English ...
+
+---
+id: zap-instinct-git-commit-prefixes
+trigger: "When choosing a commit type"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Git Commit Prefixes
+
+## Action
+
+Use one of: docs, fix, feat, test as prefix
+
+## Evidence
+
+- Pattern in commits.prefixes
+- Examples: fix(ssh_manager): ..., feat(ssh_manager): ...
+
+---
+id: zap-instinct-update-project-documentation
+trigger: "When someone wants to update, translate, or mark progress in project documentation or planning files"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Update Project Documentation
+
+## Action
+
+Edit the relevant documentation file (e.g., AGENTS.md, PLAN.md) and commit with a descriptive message
+
+## Evidence
+
+- Workflow: update-project-documentation
+- Example commits: docs(agents): translate AGENTS.md to English ...
+
+---
+id: zap-instinct-extend-ssh-manager-feature
+trigger: "When someone wants to add a new capability or fix issues in the SSH manager integration"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: Dos2Locos/zap
+---
+
+# Zap Instinct Extend Ssh Manager Feature
+
+## Action
+
+Modify or add Rust source files in crates/warp_ssh_manager/src, update/add related tests, update persistence if needed, update app/src/ssh_manager, and verify tests
+
+## Evidence
+
+- Workflow: extend-ssh-manager-feature
+- Example commits: feat(ssh_manager): add extensible advanced_config ...
+
