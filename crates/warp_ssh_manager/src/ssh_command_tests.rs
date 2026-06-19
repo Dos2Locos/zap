@@ -15,6 +15,7 @@
 //! date: 2026-06-01
 
 use super::*;
+use crate::types::{PortForward, PortForwardKind};
 use zeroize::Zeroizing;
 
 fn server() -> SshServerInfo {
@@ -55,8 +56,12 @@ fn command_line_separates_destination_with_double_dash() {
     s.username = String::new();
     s.host = "-oProxyCommand=touch /tmp/pwned".into();
     let line = build_ssh_command_line(&s);
-    let dash_dash = line.find(" -- ").expect("`--` must precede the destination");
-    let host = line.find("-oProxyCommand").expect("host present in command line");
+    let dash_dash = line
+        .find(" -- ")
+        .expect("`--` must precede the destination");
+    let host = line
+        .find("-oProxyCommand")
+        .expect("host present in command line");
     assert!(dash_dash < host, "`--` must come before the host: {line}");
 }
 
@@ -108,6 +113,135 @@ fn shell_escapes_spaces_in_path() {
     );
 }
 
+// -------- Port forwarding emission --------
+//
+// Forwards apply only to the real connection (`build_ssh_command_line`), never to the
+// connection-test paths. They are emitted as `-L/-R/-D <spec>` options before the
+// `--`/destination separator so ssh parses them as options, not as the remote command.
+// author: logic
+// date: 2026-06-19
+
+fn local_forward() -> PortForward {
+    PortForward {
+        kind: PortForwardKind::Local,
+        bind_host: "127.0.0.1".into(),
+        bind_port: 8080,
+        target_host: Some("internal.example.com".into()),
+        target_port: Some(80),
+        description: None,
+    }
+}
+
+#[test]
+fn command_line_emits_local_forward_before_separator() {
+    let mut s = server();
+    s.advanced.port_forwards = vec![local_forward()];
+    let line = build_ssh_command_line(&s);
+    // shell-escape conservatively single-quotes the spec (it contains `:`).
+    let flag_pos = line
+        .find("-L '127.0.0.1:8080:internal.example.com:80'")
+        .expect("local forward spec must appear");
+    let sep_pos = line.find(" -- ").expect("`--` separator must appear");
+    assert!(
+        flag_pos < sep_pos,
+        "forward option must precede `--`; got {line}"
+    );
+}
+
+#[test]
+fn command_line_emits_remote_forward() {
+    let mut s = server();
+    s.advanced.port_forwards = vec![PortForward {
+        kind: PortForwardKind::Remote,
+        bind_host: "0.0.0.0".into(),
+        bind_port: 9000,
+        target_host: Some("localhost".into()),
+        target_port: Some(3000),
+        description: None,
+    }];
+    let line = build_ssh_command_line(&s);
+    assert!(
+        line.contains("-R '0.0.0.0:9000:localhost:3000'"),
+        "expected remote forward spec; got {line}"
+    );
+}
+
+#[test]
+fn command_line_emits_dynamic_forward_bind_only() {
+    let mut s = server();
+    s.advanced.port_forwards = vec![PortForward {
+        kind: PortForwardKind::Dynamic,
+        bind_host: "127.0.0.1".into(),
+        bind_port: 1080,
+        target_host: None,
+        target_port: None,
+        description: None,
+    }];
+    let line = build_ssh_command_line(&s);
+    assert!(
+        line.contains("-D '127.0.0.1:1080'"),
+        "expected dynamic forward spec; got {line}"
+    );
+    assert!(
+        !line.contains("-L") && !line.contains("-R"),
+        "dynamic forward must not emit -L/-R; got {line}"
+    );
+}
+
+#[test]
+fn command_line_emits_multiple_forwards_in_order() {
+    let mut s = server();
+    s.advanced.port_forwards = vec![
+        local_forward(),
+        PortForward {
+            kind: PortForwardKind::Dynamic,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 1080,
+            target_host: None,
+            target_port: None,
+            description: None,
+        },
+    ];
+    let line = build_ssh_command_line(&s);
+    let local_pos = line.find("-L ").expect("local forward present");
+    let dynamic_pos = line.find("-D ").expect("dynamic forward present");
+    assert!(
+        local_pos < dynamic_pos,
+        "forwards must keep their configured order; got {line}"
+    );
+}
+
+#[test]
+fn command_line_skips_invalid_forward() {
+    let mut s = server();
+    // Local forward missing its target → no renderable spec → skipped.
+    s.advanced.port_forwards = vec![PortForward {
+        kind: PortForwardKind::Local,
+        bind_host: "127.0.0.1".into(),
+        bind_port: 8080,
+        target_host: None,
+        target_port: None,
+        description: None,
+    }];
+    let line = build_ssh_command_line(&s);
+    assert!(
+        !line.contains("-L"),
+        "invalid forward must be skipped; got {line}"
+    );
+}
+
+#[test]
+fn build_ssh_args_never_emits_forwards() {
+    // Forwards must not leak into the bare arg builder used by the connection-test paths.
+    let mut s = server();
+    s.advanced.port_forwards = vec![local_forward()];
+    let args = build_ssh_args(&s);
+    assert!(
+        !args.iter().any(|a| a == "-L" || a == "-R" || a == "-D"),
+        "build_ssh_args must not emit port forwards; got {args:?}"
+    );
+}
+
 #[test]
 fn test_connection_requires_password_for_password_auth() {
     let s = server();
@@ -115,10 +249,12 @@ fn test_connection_requires_password_for_password_auth() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(test_connection(&s, None));
     assert_eq!(result.status, ConnectionStatus::Offline);
-    assert!(result
-        .error_message
-        .unwrap()
-        .contains("Password not provided"));
+    assert!(
+        result
+            .error_message
+            .unwrap()
+            .contains("Password not provided")
+    );
 }
 
 #[test]
@@ -128,10 +264,12 @@ fn test_connection_requires_password_for_onekey_auth() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(test_connection(&s, None));
     assert_eq!(result.status, ConnectionStatus::Offline);
-    assert!(result
-        .error_message
-        .unwrap()
-        .contains("Password not provided"));
+    assert!(
+        result
+            .error_message
+            .unwrap()
+            .contains("Password not provided")
+    );
 }
 
 #[test]

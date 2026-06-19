@@ -51,6 +51,32 @@ pub fn build_ssh_args(server: &SshServerInfo) -> Vec<String> {
     args
 }
 
+/// Append the `-L/-R/-D <spec>` options for the server's configured port forwards.
+///
+/// Forwards whose spec cannot be rendered (e.g. a Local/Remote forward missing its
+/// target) are skipped with a warning rather than aborting the whole connection.
+/// Callers must invoke this while `args` still ends with options (i.e. before the
+/// `--`/destination separator) so ssh parses the flags as options, not as the remote
+/// command.
+fn push_port_forward_args(args: &mut Vec<String>, server: &SshServerInfo) {
+    for forward in &server.advanced.port_forwards {
+        match forward.to_ssh_spec() {
+            Some(spec) => {
+                args.push(forward.ssh_flag().to_string());
+                args.push(spec);
+            }
+            None => {
+                log::warn!(
+                    "skipping invalid port forward (missing target): kind={:?} bind={}:{}",
+                    forward.kind,
+                    forward.bind_host,
+                    forward.bind_port
+                );
+            }
+        }
+    }
+}
+
 pub fn build_ssh_command_line(server: &SshServerInfo) -> String {
     let mut args = build_ssh_args(server);
     // Insert `--` right before the destination so a host/username starting with
@@ -58,6 +84,9 @@ pub fn build_ssh_command_line(server: &SshServerInfo) -> String {
     let target = args
         .pop()
         .expect("build_ssh_args always ends with the SSH destination");
+    // Port forwards are options and must precede `--`/destination. They apply only to
+    // the real connection — the connection-test paths build a bare target without them.
+    push_port_forward_args(&mut args, server);
     args.push("--".into());
     args.push(target);
     args.iter()
@@ -195,7 +224,8 @@ async fn test_password_auth_windows(
     cmd_args: Vec<String>,
     password: &Zeroizing<String>,
 ) -> Result<(), String> {
-    let askpass = AskpassSession::new(password).map_err(|e| format!("Failed to prepare askpass: {e}"))?;
+    let askpass =
+        AskpassSession::new(password).map_err(|e| format!("Failed to prepare askpass: {e}"))?;
 
     let mut cmd = command::r#async::Command::new("ssh");
     cmd.args(&cmd_args)
@@ -207,7 +237,9 @@ async fn test_password_auth_windows(
         .kill_on_drop(true);
     askpass.apply_env(&mut cmd);
 
-    let child = cmd.spawn().map_err(|e| format!("Failed to start ssh: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start ssh: {e}"))?;
 
     // When the timeout fires, child is dropped → kill_on_drop automatically kills ssh.
     // The askpass guard is dropped at the end of the function, cleaning up temp files.

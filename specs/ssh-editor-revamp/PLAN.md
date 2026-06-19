@@ -167,16 +167,21 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
 ## 9. Milestones (atomic-commit boundaries)
 
 > **Progress:** M1 done (branch `fix/ssh-manager-review`, commit
-> `feat(ssh_manager): add extensible advanced_config ... (M1)`). M2–M5 pending.
-> Resume at M2.
+> `feat(ssh_manager): add extensible advanced_config ... (M1)`). M2 done
+> (`build_ssh_command_line` emits `-L/-R/-D` forwards before `--`; test paths
+> stay bare). M3–M5 pending. Resume at M3.
 
 1. ✅ **DONE** — `feat(ssh_manager): add advanced_config JSON column + model/migration`
    — data model (`SshAdvancedConfig`, `PortForward`), migration
    `2026-06-19-000000_add_ssh_server_advanced_config`, `schema.rs` + persistence
    model, repository read/write, sync passthrough (no UI yet).
    Verified: `cargo test -p warp_ssh_manager` (98 passed) + `cargo check -p warp`.
-2. `feat(ssh_manager): port forwarding model + ssh arg emission` —
-   `PortForward`, `to_ssh_arg`, `build_ssh_args` integration + tests.
+2. ✅ **DONE** — `feat(ssh_manager): port forwarding ssh arg emission` —
+   `PortForward` model + `to_ssh_spec`/`ssh_flag` landed in M1; this milestone
+   wires `build_ssh_command_line` to emit `-L/-R/-D <spec>` before the
+   `--`/destination separator (`push_port_forward_args`), skipping invalid
+   forwards with a warning. Connection-test paths (`build_ssh_args`) stay bare.
+   Verified: `cargo test -p warp_ssh_manager` (104 passed) + `cargo check -p warp`.
 3. `feat(ssh_manager): tabbed connection editor` — refactor `server_view` into
    tabs (General unchanged) + Port forwarding tab UI.
 4. `feat(ssh_manager): connect to ~/.ssh/config hosts without importing`.
