@@ -96,6 +96,66 @@ pub struct SshNode {
     pub is_collapsed: bool,
 }
 
+/// Direction/semantics of an SSH port forward.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardKind {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+/// A single port forward. For `Dynamic` (SOCKS) `target_host`/`target_port` are
+/// unused and should be `None`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PortForward {
+    pub kind: PortForwardKind,
+    pub bind_host: String,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub target_host: Option<String>,
+    #[serde(default)]
+    pub target_port: Option<u16>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl PortForward {
+    /// Render the forward as the value of an `ssh -L/-R/-D` option (the spec part
+    /// only, without the flag). Returns `None` if required fields are missing.
+    pub fn to_ssh_spec(&self) -> Option<String> {
+        match self.kind {
+            PortForwardKind::Local | PortForwardKind::Remote => {
+                let target_host = self.target_host.as_deref()?;
+                let target_port = self.target_port?;
+                Some(format!(
+                    "{}:{}:{}:{}",
+                    self.bind_host, self.bind_port, target_host, target_port
+                ))
+            }
+            PortForwardKind::Dynamic => Some(format!("{}:{}", self.bind_host, self.bind_port)),
+        }
+    }
+
+    /// The `ssh` flag (`-L`, `-R`, `-D`) for this forward's kind.
+    pub fn ssh_flag(&self) -> &'static str {
+        match self.kind {
+            PortForwardKind::Local => "-L",
+            PortForwardKind::Remote => "-R",
+            PortForwardKind::Dynamic => "-D",
+        }
+    }
+}
+
+/// Extensible per-server configuration persisted as a single JSON blob
+/// (`ssh_servers.advanced_config`). New options (jump host, X11/agent forwarding,
+/// ciphers, tab color, ...) are added here without a new migration per option.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SshAdvancedConfig {
+    #[serde(default)]
+    pub port_forwards: Vec<PortForward>,
+}
+
 /// Connection configuration for a server node. `password` / `passphrase` are
 /// not stored here — they go through the keychain.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,6 +170,8 @@ pub struct SshServerInfo {
     pub startup_command: Option<String>,
     pub notes: Option<String>,
     pub last_connected_at: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub advanced: SshAdvancedConfig,
 }
 
 impl SshServerInfo {
@@ -125,6 +187,7 @@ impl SshServerInfo {
             startup_command: None,
             notes: None,
             last_connected_at: None,
+            advanced: SshAdvancedConfig::default(),
         }
     }
 
@@ -141,6 +204,7 @@ impl SshServerInfo {
             startup_command: source.startup_command.clone(),
             notes: source.notes.clone(),
             last_connected_at: None,
+            advanced: source.advanced.clone(),
         }
     }
 }
@@ -173,4 +237,70 @@ pub struct ResolvedSshAuth {
     pub key_path: Option<String>,
     pub secret_lookup_id: String,
     pub secret_kind: crate::secrets::SecretKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn forward(kind: PortForwardKind) -> PortForward {
+        PortForward {
+            kind,
+            bind_host: "127.0.0.1".into(),
+            bind_port: 8000,
+            target_host: Some("example.com".into()),
+            target_port: Some(80),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn local_and_remote_forward_specs_include_target() {
+        assert_eq!(
+            forward(PortForwardKind::Local).to_ssh_spec().as_deref(),
+            Some("127.0.0.1:8000:example.com:80")
+        );
+        assert_eq!(
+            forward(PortForwardKind::Remote).to_ssh_spec().as_deref(),
+            Some("127.0.0.1:8000:example.com:80")
+        );
+    }
+
+    #[test]
+    fn dynamic_forward_spec_is_bind_only() {
+        let mut f = forward(PortForwardKind::Dynamic);
+        f.target_host = None;
+        f.target_port = None;
+        assert_eq!(f.to_ssh_spec().as_deref(), Some("127.0.0.1:8000"));
+    }
+
+    #[test]
+    fn local_forward_without_target_yields_none() {
+        let mut f = forward(PortForwardKind::Local);
+        f.target_port = None;
+        assert_eq!(f.to_ssh_spec(), None);
+    }
+
+    #[test]
+    fn ssh_flag_matches_kind() {
+        assert_eq!(forward(PortForwardKind::Local).ssh_flag(), "-L");
+        assert_eq!(forward(PortForwardKind::Remote).ssh_flag(), "-R");
+        assert_eq!(forward(PortForwardKind::Dynamic).ssh_flag(), "-D");
+    }
+
+    #[test]
+    fn advanced_config_json_round_trip() {
+        let cfg = SshAdvancedConfig {
+            port_forwards: vec![forward(PortForwardKind::Local)],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: SshAdvancedConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn advanced_config_default_deserializes_from_empty_object() {
+        let back: SshAdvancedConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, SshAdvancedConfig::default());
+    }
 }

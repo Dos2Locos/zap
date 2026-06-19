@@ -386,6 +386,7 @@ impl SshManagerPanel {
             startup_command: None,
             notes: Some(format!("Imported from {path_display}")),
             last_connected_at: None,
+            advanced: Default::default(),
         };
 
         let parent = self.parent_for_new_node();

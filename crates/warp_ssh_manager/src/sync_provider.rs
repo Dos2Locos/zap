@@ -6,7 +6,7 @@
 use crate::db::with_conn;
 use crate::repository::{SshRepository, SyncMetaRepository};
 use crate::secrets::{KeychainSecretStore, SecretKind, SshSecretStore};
-use crate::types::{NodeKind, OneKeyCredentialKind};
+use crate::types::{NodeKind, OneKeyCredentialKind, SshAdvancedConfig};
 use diesel::connection::{Connection, SimpleConnection};
 use diesel::{QueryDsl, RunQueryDsl};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,11 @@ pub struct SyncServer {
     pub password_encrypted: Option<String>,
     pub passphrase_encrypted: Option<String>,
     pub root_password_encrypted: Option<String>,
+    /// Extensible config (port forwards, ...) as a raw JSON blob, passed through
+    /// verbatim. `#[serde(default)]` keeps older payloads (without the field)
+    /// deserializable.
+    #[serde(default)]
+    pub advanced_config: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +173,11 @@ impl SyncDataProvider for SshSyncProvider {
                             token,
                             root_password.as_ref().map(|z| z.as_str()),
                         )?,
+                        advanced_config: if server.advanced == SshAdvancedConfig::default() {
+                            None
+                        } else {
+                            serde_json::to_string(&server.advanced).ok()
+                        },
                     });
                 }
             }
@@ -368,6 +378,7 @@ impl SyncDataProvider for SshSyncProvider {
                             startup_command: server.startup_command.as_deref(),
                             notes: server.notes.as_deref(),
                             credential_id: server.credential_id.as_deref(),
+                            advanced_config: server.advanced_config.as_deref(),
                         })
                         .execute(conn)?;
                 }
@@ -657,6 +668,7 @@ mod tests {
             password_encrypted: Some("enc123".to_string()),
             passphrase_encrypted: None,
             root_password_encrypted: Some("enc456".to_string()),
+            advanced_config: None,
         };
         let json = serde_json::to_string(&server).unwrap();
         let parsed: SyncServer = serde_json::from_str(&json).unwrap();
@@ -682,6 +694,7 @@ mod tests {
             password_encrypted: None,
             passphrase_encrypted: None,
             root_password_encrypted: None,
+            advanced_config: None,
         };
         let json = serde_json::to_string(&server).unwrap();
         let parsed: SyncServer = serde_json::from_str(&json).unwrap();
@@ -714,6 +727,7 @@ mod tests {
                 password_encrypted: Some("enc".to_string()),
                 passphrase_encrypted: None,
                 root_password_encrypted: None,
+                advanced_config: None,
             }],
             onekey_credentials: Vec::new(),
         };

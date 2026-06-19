@@ -692,6 +692,13 @@ impl SshServerView {
                 Some(notes_text.trim().to_string())
             },
             last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
+            // Preserve advanced config (port forwards, ...) from the loaded
+            // server; its editor UI lands in a later milestone.
+            advanced: self
+                .server
+                .as_ref()
+                .map(|s| s.advanced.clone())
+                .unwrap_or_default(),
         };
 
         // 2. 写 DB(rename + update_server + 可能的 move_node)
@@ -813,6 +820,13 @@ impl SshServerView {
                 Some(notes_text.trim().to_string())
             },
             last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
+            // Preserve advanced config (port forwards, ...) from the loaded
+            // server; its editor UI lands in a later milestone.
+            advanced: self
+                .server
+                .as_ref()
+                .map(|s| s.advanced.clone())
+                .unwrap_or_default(),
         };
         ctx.dispatch_typed_action(&crate::workspace::WorkspaceAction::OpenSshTerminal {
             node_id: self.node_id.clone(),
@@ -854,6 +868,7 @@ impl SshServerView {
             startup_command: None,
             notes: None,
             last_connected_at: None,
+            advanced: Default::default(),
         };
 
         let (server, password) = match resolve_test_server_and_password(

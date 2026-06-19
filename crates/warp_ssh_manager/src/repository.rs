@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::secrets::SecretKind;
 use crate::types::{
-    AuthType, NodeKind, OneKeyCredentialKind, ResolvedSshAuth, SshNode, SshOneKeyCredential,
-    SshServerInfo,
+    AuthType, NodeKind, OneKeyCredentialKind, ResolvedSshAuth, SshAdvancedConfig, SshNode,
+    SshOneKeyCredential, SshServerInfo,
 };
 use persistence::model::{
     NewSshNode, NewSshOneKeyCredential, NewSshServer, NewSyncMeta, SshNodeRow,
@@ -83,6 +83,7 @@ impl SshRepository {
     ) -> Result<SshNode, SshRepositoryError> {
         let id = new_uuid();
         let sort = next_sort_order(conn, parent_id)?;
+        let advanced_json = advanced_config_json(&info.advanced);
         conn.transaction::<_, DieselError, _>(|conn| {
             diesel::insert_into(ssh_nodes::table)
                 .values(NewSshNode {
@@ -104,6 +105,7 @@ impl SshRepository {
                     startup_command: info.startup_command.as_deref(),
                     notes: info.notes.as_deref(),
                     credential_id: info.credential_id.as_deref(),
+                    advanced_config: advanced_json.as_deref(),
                 })
                 .execute(conn)?;
             Ok(())
@@ -134,6 +136,7 @@ impl SshRepository {
         conn: &mut SqliteConnection,
         info: &SshServerInfo,
     ) -> Result<(), SshRepositoryError> {
+        let advanced_json = advanced_config_json(&info.advanced);
         let n = diesel::update(ssh_servers::table.find(&info.node_id))
             .set((
                 ssh_servers::host.eq(&info.host),
@@ -144,6 +147,7 @@ impl SshRepository {
                 ssh_servers::startup_command.eq(info.startup_command.as_deref()),
                 ssh_servers::notes.eq(info.notes.as_deref()),
                 ssh_servers::credential_id.eq(info.credential_id.as_deref()),
+                ssh_servers::advanced_config.eq(advanced_json.as_deref()),
             ))
             .execute(conn)?;
         if n == 0 {
@@ -446,6 +450,7 @@ fn server_from_row(r: SshServerRow) -> Result<SshServerInfo, SshRepositoryError>
         column: "ssh_servers.auth_type",
         value: r.auth_type.clone(),
     })?;
+    let advanced = parse_advanced_config(r.advanced_config.as_deref());
     Ok(SshServerInfo {
         node_id: r.node_id,
         host: r.host,
@@ -457,7 +462,32 @@ fn server_from_row(r: SshServerRow) -> Result<SshServerInfo, SshRepositoryError>
         notes: r.notes,
         last_connected_at: r.last_connected_at,
         credential_id: r.credential_id,
+        advanced,
     })
+}
+
+/// Deserialize the `advanced_config` JSON blob. A `NULL`/empty value or a parse
+/// error yields the default config (a parse error is logged) so a malformed row
+/// never blocks loading the rest of the server.
+fn parse_advanced_config(raw: Option<&str>) -> SshAdvancedConfig {
+    match raw {
+        None => SshAdvancedConfig::default(),
+        Some(s) if s.trim().is_empty() => SshAdvancedConfig::default(),
+        Some(s) => serde_json::from_str(s).unwrap_or_else(|e| {
+            log::warn!("invalid ssh_servers.advanced_config JSON, using default: {e}");
+            SshAdvancedConfig::default()
+        }),
+    }
+}
+
+/// Serialize advanced config for storage; returns `None` when it equals the
+/// default so empty rows stay `NULL`.
+fn advanced_config_json(advanced: &SshAdvancedConfig) -> Option<String> {
+    if *advanced == SshAdvancedConfig::default() {
+        None
+    } else {
+        serde_json::to_string(advanced).ok()
+    }
 }
 
 fn onekey_from_row(r: SshOneKeyCredentialRow) -> Result<SshOneKeyCredential, SshRepositoryError> {
@@ -585,6 +615,9 @@ pub(crate) fn setup_in_memory() -> SqliteConnection {
         include_str!(
             "../../persistence/migrations/2026-06-09-160000_add_ssh_onekey_key_type/up.sql"
         ),
+        include_str!(
+            "../../persistence/migrations/2026-06-19-000000_add_ssh_server_advanced_config/up.sql"
+        ),
     ] {
         conn.batch_execute(up).unwrap();
     }
@@ -607,6 +640,7 @@ mod tests {
             startup_command: None,
             notes: None,
             last_connected_at: None,
+            advanced: SshAdvancedConfig::default(),
         }
     }
 
