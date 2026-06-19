@@ -171,7 +171,9 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
 > (`build_ssh_command_line` emits `-L/-R/-D` forwards before `--`; test paths
 > stay bare). M3 done (tabbed editor: General + Port forwarding tabs;
 > forward list with delete-per-row + add-forward row; forwards persisted into
-> `advanced.port_forwards` on Save/Connect). M4–M5 pending. Resume at M4.
+> `advanced.port_forwards` on Save/Connect). M4 done (connect to a
+> `~/.ssh/config` host by alias without importing: `ssh <alias>` in a new tab,
+> no node/keychain/injection). M5 pending. Resume at M5.
 
 1. ✅ **DONE** — `feat(ssh_manager): add advanced_config JSON column + model/migration`
    — data model (`SshAdvancedConfig`, `PortForward`), migration
@@ -194,7 +196,16 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
    stays bare. New i18n keys added to en/zh-CN/ja.
    Verified: `cargo check -p warp` + `cargo clippy` (no new warnings) +
    `cargo test -p warp` (69 ssh tests + 5 new `forward_summary` tests green).
-4. `feat(ssh_manager): connect to ~/.ssh/config hosts without importing`.
+4. ✅ **DONE** — `feat(ssh_manager): connect to ~/.ssh/config hosts without
+   importing` — each candidate row gets a "Connect" action that launches
+   `ssh <alias>` in a new terminal tab. New `build_ssh_alias_command_line`
+   (shell-escaped, `--`-guarded) in `ssh_command.rs`; new
+   `SshManagerPanelAction::ConnectCandidate` → `SshManagerPanelEvent` →
+   `LeftPanelEvent::OpenSshConfigAlias` → `WorkspaceView::open_ssh_alias_terminal`
+   (no node persisted, no keychain lookup, no secret/startup/su injection —
+   OpenSSH resolves the rest from the file).
+   Verified: `cargo check -p warp` + `cargo test -p warp_ssh_manager` (3 new
+   alias-command tests green).
 5. `feat(ssh_manager): sync imported nodes with ~/.ssh/config (one-way)`.
 
 Each milestone: `cargo check` + relevant tests green before committing.

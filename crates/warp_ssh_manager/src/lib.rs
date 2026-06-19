@@ -16,7 +16,8 @@ pub use db::{set_database_path, with_conn};
 pub use repository::{SshRepository, SshRepositoryError, SyncMetaRepository};
 pub use secrets::{KeychainSecretStore, SecretKind, SshSecretStore, SshSecretStoreError};
 pub use ssh_command::{
-    ConnectionTestResult, build_ssh_args, build_ssh_command_line, test_connection,
+    ConnectionTestResult, build_ssh_alias_command_line, build_ssh_args, build_ssh_command_line,
+    test_connection,
 };
 pub use ssh_config_parser::{
     LoadOutcome, LoadResult, SshConfigCandidate, default_ssh_config_path, load_candidates,

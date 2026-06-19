@@ -100,6 +100,11 @@ pub enum SshManagerPanelAction {
     ImportCandidate {
         alias: String,
     },
+    /// "Candidates" 区段:直接连接一条候选 (`ssh <alias>`),不导入、不落库。
+    /// OpenSSH 自己从 `~/.ssh/config` 解析其余指令。
+    ConnectCandidate {
+        alias: String,
+    },
     /// 重新读 `~/.ssh/config`(用户改完 config 后点 Refresh 按钮)。
     RefreshCandidates,
     /// 折叠/展开 "Candidates" 区段(列表长时手动收起)。
@@ -123,6 +128,11 @@ pub enum SshManagerPanelEvent {
     OpenSftpPane {
         node_id: String,
         server: SshServerInfo,
+    },
+    /// 用户点击候选行的 "Connect",请求在新 terminal tab 跑 `ssh <alias>`
+    /// (不导入、不落库、不注入 keychain — OpenSSH 自行解析 `~/.ssh/config`)。
+    OpenSshConfigAlias {
+        alias: String,
     },
     PersistenceError(String),
 }
@@ -191,6 +201,8 @@ pub struct SshManagerPanel {
     candidate_row_states: HashMap<String, MouseStateHandle>,
     /// 每条 candidate 行 "+" / "Added" 按钮的 hover state(key = alias)。
     candidate_add_states: HashMap<String, MouseStateHandle>,
+    /// 每条 candidate 行 "Connect" 按钮的 hover state(key = alias)。
+    candidate_connect_states: HashMap<String, MouseStateHandle>,
     /// 区段头的 Refresh / Toggle 按钮 hover state。
     candidates_refresh_btn: MouseStateHandle,
     candidates_toggle_btn: MouseStateHandle,
@@ -218,6 +230,7 @@ impl SshManagerPanel {
             candidates,
             candidate_row_states: HashMap::new(),
             candidate_add_states: HashMap::new(),
+            candidate_connect_states: HashMap::new(),
             candidates_refresh_btn: MouseStateHandle::default(),
             candidates_toggle_btn: MouseStateHandle::default(),
         };
@@ -313,9 +326,12 @@ impl SshManagerPanel {
             .retain(|k, _| alias_set.contains(k.as_str()));
         self.candidate_add_states
             .retain(|k, _| alias_set.contains(k.as_str()));
+        self.candidate_connect_states
+            .retain(|k, _| alias_set.contains(k.as_str()));
         for a in aliases {
             self.candidate_row_states.entry(a.clone()).or_default();
-            self.candidate_add_states.entry(a).or_default();
+            self.candidate_add_states.entry(a.clone()).or_default();
+            self.candidate_connect_states.entry(a).or_default();
         }
     }
 
@@ -1332,6 +1348,38 @@ impl SshManagerPanel {
             .finish()
         };
 
+        // "Connect" 按钮 —— 直接 `ssh <alias>`,不导入。任何候选行都显示
+        // (无论是否已导入),因为"连接"语义与"导入"独立。
+        let connect_state = self
+            .candidate_connect_states
+            .get(alias)
+            .cloned()
+            .unwrap_or_default();
+        let alias_for_connect = alias.to_string();
+        let connect_label = Text::new_inline(
+            crate::t!("workspace-left-panel-ssh-manager-connect"),
+            appearance.ui_font_family(),
+            appearance.ui_font_body(),
+        )
+        .with_color(theme.sub_text_color(theme.background()).into())
+        .finish();
+        let connect_btn = Hoverable::new(connect_state, move |_| {
+            Container::new(connect_label)
+                .with_padding_left(8.0)
+                .with_padding_right(8.0)
+                .with_padding_top(2.0)
+                .with_padding_bottom(2.0)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.0)))
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(SshManagerPanelAction::ConnectCandidate {
+                alias: alias_for_connect.clone(),
+            });
+        })
+        .finish();
+
         // 使用 MainAxisSize::Max 让候选行填满面板宽度,消除右侧留白。
         let row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -1348,6 +1396,7 @@ impl SshManagerPanel {
                     .with_width(8.0)
                     .finish(),
             )
+            .with_child(connect_btn)
             .with_child(trailing)
             .with_main_axis_size(MainAxisSize::Max)
             .finish();
@@ -1781,6 +1830,11 @@ impl TypedActionView for SshManagerPanel {
             SshManagerPanelAction::OpenSftp => self.on_open_sftp(ctx),
             SshManagerPanelAction::ImportCandidate { alias } => {
                 self.on_import_candidate(alias.clone(), ctx)
+            }
+            SshManagerPanelAction::ConnectCandidate { alias } => {
+                ctx.emit(SshManagerPanelEvent::OpenSshConfigAlias {
+                    alias: alias.clone(),
+                });
             }
             SshManagerPanelAction::RefreshCandidates => {
                 self.candidates.update(ctx, |vm, ctx| vm.refresh(ctx));

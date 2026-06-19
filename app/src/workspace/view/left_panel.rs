@@ -128,6 +128,11 @@ pub enum LeftPanelEvent {
     OpenSshServerEditor {
         node_id: String,
     },
+    /// 用户点击 `~/.ssh/config` 候选行的 "Connect" → 主窗口在新 terminal tab
+    /// 跑 `ssh <alias>`,不导入、不落库、不注入 keychain。
+    OpenSshConfigAlias {
+        alias: String,
+    },
     /// 用户从 SSH 管理器右键 "连接" → 主窗口在新 terminal pane 跑 `ssh ...`
     /// 并启动 SecretInjector(Commit 3 实施;当前为占位事件)。
     OpenSshTerminal {
@@ -284,6 +289,11 @@ impl LeftPanelView {
                     ctx.emit(LeftPanelEvent::OpenSftpPane {
                         node_id: node_id.clone(),
                         server: server.clone(),
+                    });
+                }
+                SshManagerPanelEvent::OpenSshConfigAlias { alias } => {
+                    ctx.emit(LeftPanelEvent::OpenSshConfigAlias {
+                        alias: alias.clone(),
                     });
                 }
                 SshManagerPanelEvent::PersistenceError(msg) => {

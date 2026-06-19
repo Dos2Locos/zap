@@ -95,6 +95,16 @@ pub fn build_ssh_command_line(server: &SshServerInfo) -> String {
         .join(" ")
 }
 
+/// Build a `ssh <alias>` command line for connecting to a `~/.ssh/config` host
+/// without importing it: OpenSSH resolves HostName/User/Port/IdentityFile/
+/// ProxyJump/etc. from the file itself, so we pass only the alias. `--` guards
+/// against an alias that begins with `-` being parsed as an option, and the
+/// alias is shell-escaped before reaching the terminal.
+pub fn build_ssh_alias_command_line(alias: &str) -> String {
+    let escaped = shell_escape::unix::escape(Cow::Borrowed(alias));
+    format!("ssh -- {escaped}")
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ConnectionTestResult {

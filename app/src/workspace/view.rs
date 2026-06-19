@@ -5314,6 +5314,9 @@ impl Workspace {
             LeftPanelEvent::OpenSshTerminal { node_id, server } => {
                 self.open_ssh_terminal(node_id.clone(), server.clone(), ctx);
             }
+            LeftPanelEvent::OpenSshConfigAlias { alias } => {
+                self.open_ssh_alias_terminal(alias.clone(), ctx);
+            }
             LeftPanelEvent::OpenSftpPane { node_id, server: _ } => {
                 self.open_sftp_pane(node_id.clone(), ctx);
             }
@@ -5526,6 +5529,52 @@ impl Workspace {
         }
 
         // 3. 排队 ssh 命令,等 bootstrap 完成自动 flush。
+        terminal_view.update(ctx, |view, ctx| {
+            view.execute_command_or_set_pending(&cmd, ctx);
+        });
+    }
+
+    /// Connect to a `~/.ssh/config` host by alias without importing it: open a
+    /// new terminal tab and run `ssh <alias>`. OpenSSH resolves HostName / User
+    /// / Port / IdentityFile / ProxyJump from the file, so there is no persisted
+    /// node, no keychain lookup, and no secret/startup/su injection — auth is
+    /// entirely OpenSSH's responsibility (PLAN §6.1 / §10.1).
+    pub fn open_ssh_alias_terminal(&mut self, alias: String, ctx: &mut ViewContext<Self>) {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            log::warn!("open_ssh_alias_terminal: empty alias, ignoring");
+            return;
+        }
+        let cmd = warp_ssh_manager::build_ssh_alias_command_line(alias);
+        let window_id = ctx.window_id();
+
+        // 开新 tab(与 open_ssh_terminal 一致;新 tab 自动成为 active）。
+        self.add_new_session_tab_internal_with_default_session_mode_behavior(
+            NewSessionSource::Tab,
+            Some(window_id),
+            None, /* chosen_shell */
+            None, /* conversation_restoration */
+            true, /* hide_homepage */
+            DefaultSessionModeBehavior::Ignore,
+            ctx,
+        );
+
+        let pane_group = self.active_tab_pane_group();
+        let focused_pane_id = pane_group.as_ref(ctx).focused_pane_id(ctx);
+        let Some(terminal_view) = pane_group
+            .as_ref(ctx)
+            .terminal_view_from_pane_id(focused_pane_id, ctx)
+        else {
+            log::warn!("open_ssh_alias_terminal: no terminal in newly added tab");
+            return;
+        };
+
+        if AISettings::as_ref(ctx).default_session_mode(ctx) == DefaultSessionMode::Agent {
+            terminal_view.update(ctx, |view, _| {
+                view.set_enter_agent_view_after_ssh_bootstrap();
+            });
+        }
+
         terminal_view.update(ctx, |view, ctx| {
             view.execute_command_or_set_pending(&cmd, ctx);
         });

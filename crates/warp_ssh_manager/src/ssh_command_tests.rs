@@ -581,3 +581,22 @@ fn windows_askpass_script_is_spawnable() {
         "askpass output mismatch: got {stdout:?}"
     );
 }
+
+#[test]
+fn alias_command_line_passes_only_the_alias_after_separator() {
+    assert_eq!(build_ssh_alias_command_line("prod-web"), "ssh -- prod-web");
+}
+
+#[test]
+fn alias_command_line_escapes_shell_metacharacters() {
+    // A crafted alias must not be able to break out of the ssh invocation.
+    let cmd = build_ssh_alias_command_line("foo; rm -rf /");
+    assert_eq!(cmd, "ssh -- 'foo; rm -rf /'");
+}
+
+#[test]
+fn alias_command_line_guards_against_leading_dash() {
+    // `--` ensures an alias starting with `-` is treated as a destination, not an option.
+    let cmd = build_ssh_alias_command_line("-oProxyCommand=evil");
+    assert!(cmd.starts_with("ssh -- "));
+}
