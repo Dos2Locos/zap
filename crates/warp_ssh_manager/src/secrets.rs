@@ -1,8 +1,9 @@
-//! OS keychain 封装 — 用 `keyring` crate 跨平台。
-//! Windows = Credential Manager / macOS = Keychain / Linux = Secret Service。
+//! OS keychain abstraction — cross-platform via the `keyring` crate.
+//! Windows = Credential Manager / macOS = Keychain / Linux = Secret Service.
 //!
-//! Account key 形如 `<node_uuid>:password` 或 `<node_uuid>:passphrase`,
-//! 不依赖 host/username,**节点改名或改 host 不丢密码**。
+//! Account keys have the form `<node_uuid>:password` or `<node_uuid>:passphrase`.
+//! They do not depend on host or username, so **renaming a node or changing its host
+//! never loses the stored password**.
 
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -30,8 +31,8 @@ impl SecretKind {
 
 #[derive(Debug, Error)]
 pub enum SshSecretStoreError {
-    /// 平台没有可用的 keychain backend(常见于 Linux headless / WSL 无
-    /// Secret Service)。UI 层应提示用户改用私钥。
+    /// No keychain backend is available on this platform (common on headless Linux / WSL
+    /// without Secret Service). The UI layer should prompt the user to use a private key instead.
     #[error("no keychain backend available on this platform")]
     NoBackend,
     #[error("keyring error: {0}")]
@@ -49,7 +50,8 @@ impl From<keyring::Error> for SshSecretStoreError {
     }
 }
 
-/// 凭据存储抽象 — `KeychainSecretStore` 是默认实现,测试可用 mock。
+/// Credential store abstraction — `KeychainSecretStore` is the default implementation;
+/// tests can use a mock.
 pub trait SshSecretStore: Send + Sync {
     fn set(&self, node_id: &str, kind: SecretKind, secret: &str)
     -> Result<(), SshSecretStoreError>;
@@ -107,7 +109,7 @@ impl SshSecretStore for KeychainSecretStore {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! 进程内的内存 mock,绕开 OS keychain — CI / 单测用。
+    //! In-process in-memory mock that bypasses the OS keychain — for CI and unit tests.
 
     use super::*;
     use std::collections::HashMap;

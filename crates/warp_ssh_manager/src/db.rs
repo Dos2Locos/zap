@@ -1,15 +1,19 @@
-//! 全进程共享一个 `Mutex<SqliteConnection>` 给 SSH 管理器用。
+//! A single process-wide `Mutex<SqliteConnection>` shared by the SSH manager.
 //!
-//! 现状: openWarp 的主写入连接在专门的写线程里(see `app/src/persistence/sqlite.rs`)
-//! 通过 `ModelEvent` channel 异步处理。给 SSH 管理器接入那个事件总线要加 6+ enum
-//! 变体 + 跨 crate 的类型暴露,代价过高。
+//! Current state: openWarp's main write connection lives on a dedicated write
+//! thread (see `app/src/persistence/sqlite.rs`) and processes work asynchronously
+//! through a `ModelEvent` channel. Wiring the SSH manager into that event bus
+//! would require 6+ new enum variants plus cross-crate type exposure — too costly.
 //!
-//! 替代方案:**SQLite WAL 模式天然支持多写连接**(写互斥但带 busy_timeout 重试),
-//! 这里再开一个独立写连接,行为完全本地化在本 crate 里。SSH 管理器的写操作是
-//! 用户驱动(创建/删除节点),频率极低,与主写线程的冲突可忽略。
+//! Alternative: **SQLite WAL mode natively supports multiple write connections**
+//! (writes are mutually exclusive but retried via `busy_timeout`), so we open a
+//! second independent write connection whose behavior stays fully local to this
+//! crate. The SSH manager's writes are user-driven (create/delete nodes), happen
+//! very rarely, and their contention with the main write thread is negligible.
 //!
-//! 路径由调用方在初始化时传入(`set_database_path`),避免本 crate 直接依赖 app
-//! 层的 `database_file_path()`。未传路径时,`with_conn` 返回 `Err(NotInitialized)`。
+//! The path is supplied by the caller at init time (`set_database_path`) so this
+//! crate does not depend on the app layer's `database_file_path()`. If no path was
+//! provided, `with_conn` returns an error.
 
 use anyhow::{Result, anyhow};
 use diesel::connection::SimpleConnection;
@@ -21,8 +25,8 @@ use std::sync::{Mutex, OnceLock};
 static DB_PATH: OnceLock<PathBuf> = OnceLock::new();
 static CONN: OnceLock<Mutex<SqliteConnection>> = OnceLock::new();
 
-/// 由 app 启动时调用一次,传入 sqlite db 文件路径。重复调用会被忽略
-/// (OnceLock 语义)。
+/// Called once at app startup with the sqlite db file path. Repeated calls are
+/// ignored (`OnceLock` semantics).
 pub fn set_database_path(path: PathBuf) {
     let _ = DB_PATH.set(path);
 }
@@ -41,9 +45,25 @@ fn open() -> Result<SqliteConnection> {
     Ok(conn)
 }
 
-/// 锁内执行闭包。首次调用时 lazy 打开连接;后续调用复用。
+/// Run a closure under the connection lock. The connection is opened lazily on
+/// first use and reused afterwards.
+///
+/// A failure to open the database is propagated as an `Err` rather than panicking:
+/// the connection is opened behind a fallible path instead of inside
+/// `OnceLock::get_or_init` (whose closure cannot return a `Result`).
 pub fn with_conn<R>(f: impl FnOnce(&mut SqliteConnection) -> Result<R>) -> Result<R> {
-    let mtx = CONN.get_or_init(|| Mutex::new(open().expect("warp_ssh_manager db open")));
+    let mtx = match CONN.get() {
+        Some(mtx) => mtx,
+        None => {
+            // Open outside the lock. If another thread initialized CONN
+            // concurrently, our `set` is ignored and we fall back to the winner;
+            // the extra connection we opened is simply dropped.
+            let conn = open()?;
+            let _ = CONN.set(Mutex::new(conn));
+            CONN.get()
+                .expect("CONN was just set above or by a racing thread")
+        }
+    };
     let mut guard = mtx
         .lock()
         .map_err(|_| anyhow!("warp_ssh_manager db mutex poisoned"))?;
