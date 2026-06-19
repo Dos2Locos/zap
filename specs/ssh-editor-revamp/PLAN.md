@@ -165,9 +165,16 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
 - File-size: split `server_view.rs` if tabs push it past ~800 lines.
 
 ## 9. Milestones (atomic-commit boundaries)
-1. `feat(ssh_manager): add advanced_config JSON column + model/migration` — data
-   model, migration, schema regen, repository read/write, sync passthrough (no UI
-   yet). Verifiable by tests.
+
+> **Progress:** M1 done (branch `fix/ssh-manager-review`, commit
+> `feat(ssh_manager): add extensible advanced_config ... (M1)`). M2–M5 pending.
+> Resume at M2.
+
+1. ✅ **DONE** — `feat(ssh_manager): add advanced_config JSON column + model/migration`
+   — data model (`SshAdvancedConfig`, `PortForward`), migration
+   `2026-06-19-000000_add_ssh_server_advanced_config`, `schema.rs` + persistence
+   model, repository read/write, sync passthrough (no UI yet).
+   Verified: `cargo test -p warp_ssh_manager` (98 passed) + `cargo check -p warp`.
 2. `feat(ssh_manager): port forwarding model + ssh arg emission` —
    `PortForward`, `to_ssh_arg`, `build_ssh_args` integration + tests.
 3. `feat(ssh_manager): tabbed connection editor` — refactor `server_view` into
