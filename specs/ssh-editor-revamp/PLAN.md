@@ -169,7 +169,9 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
 > **Progress:** M1 done (branch `fix/ssh-manager-review`, commit
 > `feat(ssh_manager): add extensible advanced_config ... (M1)`). M2 done
 > (`build_ssh_command_line` emits `-L/-R/-D` forwards before `--`; test paths
-> stay bare). M3–M5 pending. Resume at M3.
+> stay bare). M3 done (tabbed editor: General + Port forwarding tabs;
+> forward list with delete-per-row + add-forward row; forwards persisted into
+> `advanced.port_forwards` on Save/Connect). M4–M5 pending. Resume at M4.
 
 1. ✅ **DONE** — `feat(ssh_manager): add advanced_config JSON column + model/migration`
    — data model (`SshAdvancedConfig`, `PortForward`), migration
@@ -182,8 +184,16 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
    `--`/destination separator (`push_port_forward_args`), skipping invalid
    forwards with a warning. Connection-test paths (`build_ssh_args`) stay bare.
    Verified: `cargo test -p warp_ssh_manager` (104 passed) + `cargo check -p warp`.
-3. `feat(ssh_manager): tabbed connection editor` — refactor `server_view` into
-   tabs (General unchanged) + Port forwarding tab UI.
+3. ✅ **DONE** — `feat(ssh_manager): tabbed connection editor` — refactored
+   `server_view` into a tab bar (`ServerEditorTab::General | Forwarding`);
+   General fields moved verbatim into `add_general_tab_fields` (no behavior
+   change). Port forwarding tab: read-only list of forwards (delete per row) +
+   an add-forward row with Local/Remote/Dynamic toggle (target fields hidden for
+   Dynamic), bind host/port, target host/port, optional description. Forwards
+   are persisted into `advanced.port_forwards` on Save/Connect; the test path
+   stays bare. New i18n keys added to en/zh-CN/ja.
+   Verified: `cargo check -p warp` + `cargo clippy` (no new warnings) +
+   `cargo test -p warp` (69 ssh tests + 5 new `forward_summary` tests green).
 4. `feat(ssh_manager): connect to ~/.ssh/config hosts without importing`.
 5. `feat(ssh_manager): sync imported nodes with ~/.ssh/config (one-way)`.
 

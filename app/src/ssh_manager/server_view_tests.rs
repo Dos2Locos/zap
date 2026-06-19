@@ -257,3 +257,51 @@ fn missing_lookup_id_returns_none_when_editor_empty() {
     let store = MockSecretStore::new();
     assert!(resolve_test_password(None, SecretKind::OneKeyPassword, "", &store).is_none());
 }
+
+fn make_forward(kind: PortForwardKind) -> PortForward {
+    PortForward {
+        kind,
+        bind_host: "127.0.0.1".to_string(),
+        bind_port: 8080,
+        target_host: Some("localhost".to_string()),
+        target_port: Some(80),
+        description: None,
+    }
+}
+
+#[test]
+fn forward_summary_local_shows_flag_and_target_arrow() {
+    let summary = forward_summary(&make_forward(PortForwardKind::Local));
+    assert_eq!(summary, "-L 127.0.0.1:8080 → localhost:80");
+}
+
+#[test]
+fn forward_summary_remote_uses_remote_flag() {
+    let summary = forward_summary(&make_forward(PortForwardKind::Remote));
+    assert_eq!(summary, "-R 127.0.0.1:8080 → localhost:80");
+}
+
+#[test]
+fn forward_summary_dynamic_omits_target() {
+    let mut forward = make_forward(PortForwardKind::Dynamic);
+    forward.target_host = None;
+    forward.target_port = None;
+    let summary = forward_summary(&forward);
+    assert_eq!(summary, "-D 127.0.0.1:8080");
+}
+
+#[test]
+fn forward_summary_appends_description_when_present() {
+    let mut forward = make_forward(PortForwardKind::Local);
+    forward.description = Some("web tunnel".to_string());
+    let summary = forward_summary(&forward);
+    assert_eq!(summary, "-L 127.0.0.1:8080 → localhost:80  (web tunnel)");
+}
+
+#[test]
+fn forward_summary_ignores_blank_description() {
+    let mut forward = make_forward(PortForwardKind::Local);
+    forward.description = Some("   ".to_string());
+    let summary = forward_summary(&forward);
+    assert_eq!(summary, "-L 127.0.0.1:8080 → localhost:80");
+}

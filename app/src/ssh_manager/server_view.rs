@@ -32,9 +32,9 @@ use warpui::{
 };
 
 use warp_ssh_manager::{
-    AuthType, ConnectionStatus, KeychainSecretStore, NodeKind, OneKeyCredentialKind, SecretKind,
-    SshNode, SshOneKeyCredential, SshRepository, SshSecretStore, SshSecretStoreError,
-    SshServerInfo,
+    AuthType, ConnectionStatus, KeychainSecretStore, NodeKind, OneKeyCredentialKind, PortForward,
+    PortForwardKind, SecretKind, SshAdvancedConfig, SshNode, SshOneKeyCredential, SshRepository,
+    SshSecretStore, SshSecretStoreError, SshServerInfo,
 };
 use zeroize::Zeroizing;
 
@@ -71,6 +71,22 @@ pub enum SshServerAction {
     SetManagedOneKeyKey,
     SaveManagedOneKeyCredential,
     DeleteManagedOneKeyCredential,
+    /// 切换编辑器顶部的标签页(General / Port forwarding)。
+    SelectTab(ServerEditorTab),
+    /// 设置"新增转发"行的类型(Local / Remote / Dynamic)。
+    SetForwardKind(PortForwardKind),
+    /// 把"新增转发"行的内容追加到 port_forwards 列表。
+    AddPortForward,
+    /// 删除 port_forwards 中指定下标的转发。
+    DeletePortForward(usize),
+}
+
+/// Which editor tab is currently shown. Phase 1 renders only the tabs that are
+/// implemented (General + Port forwarding); there are no placeholder tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerEditorTab {
+    General,
+    Forwarding,
 }
 
 /// 一次性显示在 Save 按钮上方/下方的状态标签。
@@ -151,6 +167,29 @@ pub struct SshServerView {
     latency_ms: Option<u64>,
     is_testing: bool,
     scroll_state: ClippedScrollStateHandle,
+
+    /// Currently selected editor tab (defaults to General).
+    active_tab: ServerEditorTab,
+    /// Working copy of the server's port forwards. Loaded on `reload` and
+    /// persisted into `advanced.port_forwards` on Save / Connect.
+    port_forwards: Vec<PortForward>,
+    /// Kind selected in the "add forward" row.
+    new_forward_kind: PortForwardKind,
+    /// Editors backing the "add forward" row.
+    fwd_bind_host_editor: ViewHandle<EditorView>,
+    fwd_bind_port_editor: ViewHandle<EditorView>,
+    fwd_target_host_editor: ViewHandle<EditorView>,
+    fwd_target_port_editor: ViewHandle<EditorView>,
+    fwd_description_editor: ViewHandle<EditorView>,
+    tab_general_btn_state: MouseStateHandle,
+    tab_forwarding_btn_state: MouseStateHandle,
+    fwd_kind_local_btn_state: MouseStateHandle,
+    fwd_kind_remote_btn_state: MouseStateHandle,
+    fwd_kind_dynamic_btn_state: MouseStateHandle,
+    fwd_add_btn_state: MouseStateHandle,
+    /// One delete-button state per row in `port_forwards`, kept in sync on
+    /// add/delete/reload.
+    fwd_delete_btn_states: Vec<MouseStateHandle>,
 }
 
 impl SshServerView {
@@ -181,6 +220,16 @@ impl SshServerView {
         let notes_editor = make_editor(
             false,
             &crate::t!("workspace-left-panel-ssh-manager-notes-placeholder"),
+            ctx,
+        );
+
+        let fwd_bind_host_editor = make_editor(false, "127.0.0.1", ctx);
+        let fwd_bind_port_editor = make_editor(false, "8080", ctx);
+        let fwd_target_host_editor = make_editor(false, "localhost", ctx);
+        let fwd_target_port_editor = make_editor(false, "80", ctx);
+        let fwd_description_editor = make_editor(
+            false,
+            &crate::t!("workspace-left-panel-ssh-manager-forward-description"),
             ctx,
         );
 
@@ -215,6 +264,11 @@ impl SshServerView {
             root_password_editor,
             startup_command_editor,
             notes_editor,
+            fwd_bind_host_editor,
+            fwd_bind_port_editor,
+            fwd_target_host_editor,
+            fwd_target_port_editor,
+            fwd_description_editor,
             auth_type: AuthType::Password,
             save_btn_state: MouseStateHandle::default(),
             connect_btn_state: MouseStateHandle::default(),
@@ -247,6 +301,16 @@ impl SshServerView {
             latency_ms: None,
             is_testing: false,
             scroll_state: ClippedScrollStateHandle::default(),
+            active_tab: ServerEditorTab::General,
+            port_forwards: Vec::new(),
+            new_forward_kind: PortForwardKind::Local,
+            tab_general_btn_state: MouseStateHandle::default(),
+            tab_forwarding_btn_state: MouseStateHandle::default(),
+            fwd_kind_local_btn_state: MouseStateHandle::default(),
+            fwd_kind_remote_btn_state: MouseStateHandle::default(),
+            fwd_kind_dynamic_btn_state: MouseStateHandle::default(),
+            fwd_add_btn_state: MouseStateHandle::default(),
+            fwd_delete_btn_states: Vec::new(),
         };
         me.reload(ctx);
 
@@ -361,6 +425,14 @@ impl SshServerView {
                 self.current_group_id = None;
             }
         }
+
+        // Load the working copy of port forwards from the (re)loaded server.
+        self.set_port_forwards(
+            self.server
+                .as_ref()
+                .map(|s| s.advanced.port_forwards.clone())
+                .unwrap_or_default(),
+        );
 
         // 把节点名 / server 字段写入 editor buffer
         let name = self
@@ -692,13 +764,12 @@ impl SshServerView {
                 Some(notes_text.trim().to_string())
             },
             last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
-            // Preserve advanced config (port forwards, ...) from the loaded
-            // server; its editor UI lands in a later milestone.
-            advanced: self
-                .server
-                .as_ref()
-                .map(|s| s.advanced.clone())
-                .unwrap_or_default(),
+            // Persist the port forwards edited in the Port forwarding tab. The
+            // bare config is rebuilt from the editor's working copy so changes
+            // are saved even before the next reload.
+            advanced: SshAdvancedConfig {
+                port_forwards: self.port_forwards.clone(),
+            },
         };
 
         // 2. 写 DB(rename + update_server + 可能的 move_node)
@@ -820,13 +891,12 @@ impl SshServerView {
                 Some(notes_text.trim().to_string())
             },
             last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
-            // Preserve advanced config (port forwards, ...) from the loaded
-            // server; its editor UI lands in a later milestone.
-            advanced: self
-                .server
-                .as_ref()
-                .map(|s| s.advanced.clone())
-                .unwrap_or_default(),
+            // Persist the port forwards edited in the Port forwarding tab. The
+            // bare config is rebuilt from the editor's working copy so changes
+            // are saved even before the next reload.
+            advanced: SshAdvancedConfig {
+                port_forwards: self.port_forwards.clone(),
+            },
         };
         ctx.dispatch_typed_action(&crate::workspace::WorkspaceAction::OpenSshTerminal {
             node_id: self.node_id.clone(),
@@ -1114,6 +1184,461 @@ impl SshServerView {
     }
 
     // ---------- 渲染 helpers ---------- //
+
+    /// Replace the working copy of port forwards and resize the matching
+    /// per-row delete-button state vector so the two stay in lockstep.
+    fn set_port_forwards(&mut self, forwards: Vec<PortForward>) {
+        self.fwd_delete_btn_states = forwards
+            .iter()
+            .map(|_| MouseStateHandle::default())
+            .collect();
+        self.port_forwards = forwards;
+    }
+
+    /// Read the "add forward" row, validate it, and append it to the working
+    /// list. Invalid rows surface an error banner and are not added.
+    fn on_add_port_forward(&mut self, ctx: &mut ViewContext<Self>) {
+        let bind_host = self.current_text(&self.fwd_bind_host_editor.clone(), ctx);
+        let bind_port_text = self.current_text(&self.fwd_bind_port_editor.clone(), ctx);
+        let target_host = self.current_text(&self.fwd_target_host_editor.clone(), ctx);
+        let target_port_text = self.current_text(&self.fwd_target_port_editor.clone(), ctx);
+        let description = self.current_text(&self.fwd_description_editor.clone(), ctx);
+
+        let kind = self.new_forward_kind;
+        let bind_host = bind_host.trim();
+        let bind_port: Option<u16> = bind_port_text.trim().parse().ok();
+        let target_host_trimmed = target_host.trim();
+        let target_port: Option<u16> = target_port_text.trim().parse().ok();
+
+        let Some(bind_port) = bind_port.filter(|_| !bind_host.is_empty()) else {
+            self.status = Some(StatusBanner::Error(crate::t!(
+                "workspace-left-panel-ssh-manager-forward-invalid"
+            )));
+            ctx.notify();
+            return;
+        };
+
+        let (target_host, target_port) = match kind {
+            PortForwardKind::Local | PortForwardKind::Remote => {
+                let (Some(port), false) = (target_port, target_host_trimmed.is_empty()) else {
+                    self.status = Some(StatusBanner::Error(crate::t!(
+                        "workspace-left-panel-ssh-manager-forward-invalid"
+                    )));
+                    ctx.notify();
+                    return;
+                };
+                (Some(target_host_trimmed.to_string()), Some(port))
+            }
+            PortForwardKind::Dynamic => (None, None),
+        };
+
+        let description = description.trim();
+        let forward = PortForward {
+            kind,
+            bind_host: bind_host.to_string(),
+            bind_port,
+            target_host,
+            target_port,
+            description: (!description.is_empty()).then(|| description.to_string()),
+        };
+
+        self.port_forwards.push(forward);
+        self.fwd_delete_btn_states.push(MouseStateHandle::default());
+
+        // Clear the add-forward row for the next entry.
+        for editor in [
+            &self.fwd_bind_host_editor,
+            &self.fwd_bind_port_editor,
+            &self.fwd_target_host_editor,
+            &self.fwd_target_port_editor,
+            &self.fwd_description_editor,
+        ] {
+            editor.update(ctx, |e, ctx| e.set_buffer_text("", ctx));
+        }
+        self.status = None;
+        ctx.notify();
+    }
+
+    /// Remove the port forward at `index` (and its delete-button state).
+    fn on_delete_port_forward(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if index < self.port_forwards.len() {
+            self.port_forwards.remove(index);
+            self.fwd_delete_btn_states.remove(index);
+            ctx.notify();
+        }
+    }
+
+    /// Add the General tab fields (name / group / host / port / user / auth /
+    /// startup / root password / notes) to `col`. Moved verbatim from the old
+    /// flat form — no behavior change.
+    fn add_general_tab_fields(&self, col: &mut Flex, appearance: &Appearance) {
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-field-name"),
+            &self.name_editor,
+            appearance,
+        ));
+
+        // 分组下拉
+        col.add_child(self.render_group_field(appearance));
+
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-detail-host"),
+            &self.host_editor,
+            appearance,
+        ));
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-detail-port"),
+            &self.port_editor,
+            appearance,
+        ));
+        if self.auth_type != AuthType::OneKey {
+            col.add_child(self.render_text_field(
+                &crate::t!("workspace-left-panel-ssh-manager-detail-user"),
+                &self.user_editor,
+                appearance,
+            ));
+        }
+        col.add_child(self.render_auth_toggle(appearance));
+
+        for field in auth_specific_fields(self.auth_type) {
+            match field {
+                AuthSpecificField::Password => {
+                    col.add_child(self.render_text_field(
+                        &crate::t!("workspace-left-panel-ssh-manager-auth-password"),
+                        &self.password_editor,
+                        appearance,
+                    ));
+                }
+                AuthSpecificField::KeyPath => {
+                    col.add_child(self.render_key_path_field(appearance));
+                }
+                AuthSpecificField::Passphrase => {
+                    col.add_child(self.render_text_field(
+                        &crate::t!("workspace-left-panel-ssh-manager-passphrase"),
+                        &self.password_editor,
+                        appearance,
+                    ));
+                }
+                AuthSpecificField::OneKeyCredential => {
+                    col.add_child(self.render_onekey_credential_field(appearance));
+                }
+            }
+        }
+
+        // 启动命令
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-startup-command"),
+            &self.startup_command_editor,
+            appearance,
+        ));
+        // Root 密码
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-root-password"),
+            &self.root_password_editor,
+            appearance,
+        ));
+        // 备注
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-notes"),
+            &self.notes_editor,
+            appearance,
+        ));
+    }
+
+    /// Tab bar shown above the editor body. Only implemented tabs are rendered.
+    fn render_tab_bar(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let make_tab = |label: String,
+                        active: bool,
+                        state: MouseStateHandle,
+                        tab: ServerEditorTab|
+         -> Box<dyn Element> {
+            let color = if active {
+                theme.main_text_color(theme.background())
+            } else {
+                theme.sub_text_color(theme.background())
+            };
+            let label_el = Text::new_inline(
+                label,
+                appearance.ui_font_family(),
+                appearance.ui_font_size(),
+            )
+            .with_color(color.into())
+            .finish();
+            // Active tab gets an accent underline; inactive stays flat.
+            let underline_color = if active {
+                theme.accent()
+            } else {
+                theme.surface_2()
+            };
+            let underline = Container::new(
+                ConstrainedBox::new(Flex::row().with_main_axis_size(MainAxisSize::Min).finish())
+                    .with_height(2.0)
+                    .finish(),
+            )
+            .with_background(underline_color)
+            .with_margin_top(6.0)
+            .finish();
+            Hoverable::new(state, move |_| {
+                Container::new(
+                    Flex::column()
+                        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                        .with_child(
+                            Container::new(label_el)
+                                .with_padding_left(4.0)
+                                .with_padding_right(4.0)
+                                .finish(),
+                        )
+                        .with_child(underline)
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .finish(),
+                )
+                .with_padding_right(16.0)
+                .finish()
+            })
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(SshServerAction::SelectTab(tab)))
+            .finish()
+        };
+
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_child(make_tab(
+                crate::t!("workspace-left-panel-ssh-manager-tab-general"),
+                self.active_tab == ServerEditorTab::General,
+                self.tab_general_btn_state.clone(),
+                ServerEditorTab::General,
+            ))
+            .with_child(make_tab(
+                crate::t!("workspace-left-panel-ssh-manager-tab-forwarding"),
+                self.active_tab == ServerEditorTab::Forwarding,
+                self.tab_forwarding_btn_state.clone(),
+                ServerEditorTab::Forwarding,
+            ))
+            .finish();
+
+        Container::new(row).with_margin_bottom(16.0).finish()
+    }
+
+    /// Port forwarding tab: the list of configured forwards (delete per row) +
+    /// an "add forward" row.
+    fn render_forwarding_tab(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let mut col = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+        if self.port_forwards.is_empty() {
+            let empty = Text::new_inline(
+                crate::t!("workspace-left-panel-ssh-manager-forward-empty"),
+                appearance.ui_font_family(),
+                appearance.ui_font_size(),
+            )
+            .with_color(theme.sub_text_color(theme.background()).into())
+            .finish();
+            col.add_child(Container::new(empty).with_margin_bottom(12.0).finish());
+        } else {
+            for (index, forward) in self.port_forwards.iter().enumerate() {
+                col.add_child(self.render_forward_row(index, forward, appearance));
+            }
+        }
+
+        col.add_child(self.render_forward_add_row(appearance));
+        col.finish()
+    }
+
+    /// One read-only row describing a configured forward + a Delete button.
+    fn render_forward_row(
+        &self,
+        index: usize,
+        forward: &PortForward,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let summary = forward_summary(forward);
+        let summary_el = Text::new_inline(
+            summary,
+            appearance.monospace_font_family(),
+            appearance.ui_font_size(),
+        )
+        .with_color(theme.main_text_color(theme.background()).into())
+        .finish();
+
+        let delete_state = self
+            .fwd_delete_btn_states
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let delete_label = Text::new_inline(
+            crate::t!("workspace-left-panel-ssh-manager-forward-delete"),
+            appearance.ui_font_family(),
+            appearance.ui_font_size(),
+        )
+        .with_color(theme.sub_text_color(theme.background()).into())
+        .finish();
+        let delete_btn = Hoverable::new(delete_state, move |_| {
+            Container::new(delete_label)
+                .with_padding_left(10.0)
+                .with_padding_right(10.0)
+                .with_padding_top(4.0)
+                .with_padding_bottom(4.0)
+                .with_background(theme.surface_2())
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(SshServerAction::DeletePortForward(index))
+        })
+        .finish();
+
+        let row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(summary_el)
+            .with_child(delete_btn)
+            .finish();
+
+        Container::new(row)
+            .with_uniform_padding(10.0)
+            .with_margin_bottom(8.0)
+            .with_background(theme.surface_1())
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+            .finish()
+    }
+
+    /// The "add forward" row: kind toggle + bind/target fields + Add button.
+    fn render_forward_add_row(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let mut col = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        col.add_child(self.render_forward_kind_toggle(appearance));
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-forward-bind-host"),
+            &self.fwd_bind_host_editor,
+            appearance,
+        ));
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-forward-bind-port"),
+            &self.fwd_bind_port_editor,
+            appearance,
+        ));
+        // Local/Remote forward to a target; Dynamic (SOCKS) does not.
+        if self.new_forward_kind != PortForwardKind::Dynamic {
+            col.add_child(self.render_text_field(
+                &crate::t!("workspace-left-panel-ssh-manager-forward-target-host"),
+                &self.fwd_target_host_editor,
+                appearance,
+            ));
+            col.add_child(self.render_text_field(
+                &crate::t!("workspace-left-panel-ssh-manager-forward-target-port"),
+                &self.fwd_target_port_editor,
+                appearance,
+            ));
+        }
+        col.add_child(self.render_text_field(
+            &crate::t!("workspace-left-panel-ssh-manager-forward-description"),
+            &self.fwd_description_editor,
+            appearance,
+        ));
+
+        let add_btn = appearance
+            .ui_builder()
+            .button(ButtonVariant::Secondary, self.fwd_add_btn_state.clone())
+            .with_style(UiComponentStyles {
+                font_weight: Some(Weight::Bold),
+                height: Some(SAVE_BUTTON_HEIGHT),
+                font_size: Some(13.0),
+                ..Default::default()
+            })
+            .with_centered_text_label(crate::t!("workspace-left-panel-ssh-manager-forward-add"))
+            .build()
+            .on_click(move |ctx, _, _| ctx.dispatch_typed_action(SshServerAction::AddPortForward))
+            .finish();
+        col.add_child(Container::new(add_btn).with_margin_top(4.0).finish());
+
+        Container::new(col.finish()).with_margin_top(8.0).finish()
+    }
+
+    /// Local / Remote / Dynamic toggle for the add-forward row.
+    fn render_forward_kind_toggle(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let make_pill = |label: String,
+                         active: bool,
+                         state: MouseStateHandle,
+                         kind: PortForwardKind|
+         -> Box<dyn Element> {
+            let main_color = if active {
+                theme.main_text_color(theme.accent())
+            } else {
+                theme.sub_text_color(theme.background())
+            };
+            let bg = if active {
+                theme.accent()
+            } else {
+                theme.surface_2()
+            };
+            let label_el = Text::new_inline(
+                label,
+                appearance.ui_font_family(),
+                appearance.ui_font_size(),
+            )
+            .with_color(main_color.into())
+            .finish();
+            Hoverable::new(state, move |_| {
+                Container::new(label_el)
+                    .with_padding_left(AUTH_TOGGLE_PADDING_H)
+                    .with_padding_right(AUTH_TOGGLE_PADDING_H)
+                    .with_padding_top(AUTH_TOGGLE_PADDING_V)
+                    .with_padding_bottom(AUTH_TOGGLE_PADDING_V)
+                    .with_background(bg)
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+                    .finish()
+            })
+            .with_cursor(Cursor::PointingHand)
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(SshServerAction::SetForwardKind(kind))
+            })
+            .finish()
+        };
+
+        let mut kind_row = Wrap::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.0)
+            .with_run_spacing(8.0)
+            .with_main_axis_size(MainAxisSize::Min);
+        for kind in [
+            PortForwardKind::Local,
+            PortForwardKind::Remote,
+            PortForwardKind::Dynamic,
+        ] {
+            kind_row.add_child(make_pill(
+                forward_kind_label(kind),
+                self.new_forward_kind == kind,
+                self.forward_kind_button_state(kind),
+                kind,
+            ));
+        }
+
+        Container::new(
+            Flex::column()
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(self.render_label(
+                    &crate::t!("workspace-left-panel-ssh-manager-detail-auth"),
+                    appearance,
+                ))
+                .with_child(kind_row.finish())
+                .finish(),
+        )
+        .with_margin_bottom(FIELD_BLOCK_MARGIN_BOTTOM)
+        .finish()
+    }
+
+    fn forward_kind_button_state(&self, kind: PortForwardKind) -> MouseStateHandle {
+        match kind {
+            PortForwardKind::Local => self.fwd_kind_local_btn_state.clone(),
+            PortForwardKind::Remote => self.fwd_kind_remote_btn_state.clone(),
+            PortForwardKind::Dynamic => self.fwd_kind_dynamic_btn_state.clone(),
+        }
+    }
 
     fn render_label(&self, text: &str, appearance: &Appearance) -> Box<dyn Element> {
         let theme = appearance.theme();
@@ -1965,6 +2490,44 @@ fn auth_toggle_label(auth_type: AuthType) -> String {
     }
 }
 
+fn forward_kind_label(kind: PortForwardKind) -> String {
+    match kind {
+        PortForwardKind::Local => crate::t!("workspace-left-panel-ssh-manager-forward-kind-local"),
+        PortForwardKind::Remote => {
+            crate::t!("workspace-left-panel-ssh-manager-forward-kind-remote")
+        }
+        PortForwardKind::Dynamic => {
+            crate::t!("workspace-left-panel-ssh-manager-forward-kind-dynamic")
+        }
+    }
+}
+
+/// Human-readable one-line summary of a forward for the read-only list, e.g.
+/// `-L 127.0.0.1:8080 → localhost:80  (tunnel)` or `-D 127.0.0.1:1080  (socks)`.
+fn forward_summary(forward: &PortForward) -> String {
+    let flag = forward.ssh_flag();
+    let bind = format!("{}:{}", forward.bind_host, forward.bind_port);
+    let mut summary = match forward.kind {
+        PortForwardKind::Dynamic => format!("{flag} {bind}"),
+        PortForwardKind::Local | PortForwardKind::Remote => {
+            let target = match (forward.target_host.as_deref(), forward.target_port) {
+                (Some(host), Some(port)) => format!("{host}:{port}"),
+                _ => String::new(),
+            };
+            format!("{flag} {bind} → {target}")
+        }
+    };
+    if let Some(description) = forward
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        summary.push_str(&format!("  ({description})"));
+    }
+    summary
+}
+
 impl Entity for SshServerView {
     type Event = PaneEvent;
 }
@@ -2055,6 +2618,20 @@ impl TypedActionView for SshServerView {
                 self.rebuild_onekey_credential_dropdown(ctx);
                 ctx.notify();
             }
+            SshServerAction::SelectTab(tab) => {
+                if self.active_tab != *tab {
+                    self.active_tab = *tab;
+                    ctx.notify();
+                }
+            }
+            SshServerAction::SetForwardKind(kind) => {
+                if self.new_forward_kind != *kind {
+                    self.new_forward_kind = *kind;
+                    ctx.notify();
+                }
+            }
+            SshServerAction::AddPortForward => self.on_add_port_forward(ctx),
+            SshServerAction::DeletePortForward(index) => self.on_delete_port_forward(*index, ctx),
         }
     }
 }
@@ -2141,77 +2718,16 @@ impl View for SshServerView {
             col.add_child(banner);
         }
 
-        col.add_child(self.render_text_field(
-            &crate::t!("workspace-left-panel-ssh-manager-field-name"),
-            &self.name_editor,
-            appearance,
-        ));
+        col.add_child(self.render_tab_bar(appearance));
 
-        // 分组下拉
-        col.add_child(self.render_group_field(appearance));
-
-        col.add_child(self.render_text_field(
-            &crate::t!("workspace-left-panel-ssh-manager-detail-host"),
-            &self.host_editor,
-            appearance,
-        ));
-        col.add_child(self.render_text_field(
-            &crate::t!("workspace-left-panel-ssh-manager-detail-port"),
-            &self.port_editor,
-            appearance,
-        ));
-        if self.auth_type != AuthType::OneKey {
-            col.add_child(self.render_text_field(
-                &crate::t!("workspace-left-panel-ssh-manager-detail-user"),
-                &self.user_editor,
-                appearance,
-            ));
-        }
-        col.add_child(self.render_auth_toggle(appearance));
-
-        for field in auth_specific_fields(self.auth_type) {
-            match field {
-                AuthSpecificField::Password => {
-                    col.add_child(self.render_text_field(
-                        &crate::t!("workspace-left-panel-ssh-manager-auth-password"),
-                        &self.password_editor,
-                        appearance,
-                    ));
-                }
-                AuthSpecificField::KeyPath => {
-                    col.add_child(self.render_key_path_field(appearance));
-                }
-                AuthSpecificField::Passphrase => {
-                    col.add_child(self.render_text_field(
-                        &crate::t!("workspace-left-panel-ssh-manager-passphrase"),
-                        &self.password_editor,
-                        appearance,
-                    ));
-                }
-                AuthSpecificField::OneKeyCredential => {
-                    col.add_child(self.render_onekey_credential_field(appearance));
-                }
+        match self.active_tab {
+            ServerEditorTab::Forwarding => {
+                col.add_child(self.render_forwarding_tab(appearance));
+            }
+            ServerEditorTab::General => {
+                self.add_general_tab_fields(&mut col, appearance);
             }
         }
-
-        // 启动命令
-        col.add_child(self.render_text_field(
-            &crate::t!("workspace-left-panel-ssh-manager-startup-command"),
-            &self.startup_command_editor,
-            appearance,
-        ));
-        // Root 密码
-        col.add_child(self.render_text_field(
-            &crate::t!("workspace-left-panel-ssh-manager-root-password"),
-            &self.root_password_editor,
-            appearance,
-        ));
-        // 备注
-        col.add_child(self.render_text_field(
-            &crate::t!("workspace-left-panel-ssh-manager-notes"),
-            &self.notes_editor,
-            appearance,
-        ));
 
         let theme = appearance.theme();
         let inner = ConstrainedBox::new(
