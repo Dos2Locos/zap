@@ -1377,36 +1377,28 @@ impl SshServerView {
             )
             .with_color(color.into())
             .finish();
-            // Active tab gets an accent underline; inactive stays flat.
+            // Active tab gets an accent underline; inactive stays flat. The
+            // underline is a *bottom border* on the label container (which sizes
+            // to the text), not a stretched child. This tab sits inside a
+            // `Flex::row(MainAxisSize::Min)`, which lays out each tab with an
+            // unbounded (infinite) main-axis width; a `CrossAxisAlignment::
+            // Stretch` column would force the child's width to that infinity,
+            // producing an infinite `size.x` that trips `Scene::validate_rect`
+            // and aborts the process. A bottom border avoids the stretch path
+            // entirely while keeping the same visual (text-width underline).
             let underline_color = if active {
                 theme.accent()
             } else {
                 theme.surface_2()
             };
-            let underline = Container::new(
-                ConstrainedBox::new(Flex::row().with_main_axis_size(MainAxisSize::Min).finish())
-                    .with_height(2.0)
-                    .finish(),
-            )
-            .with_background(underline_color)
-            .with_margin_top(6.0)
-            .finish();
             Hoverable::new(state, move |_| {
-                Container::new(
-                    Flex::column()
-                        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                        .with_child(
-                            Container::new(label_el)
-                                .with_padding_left(4.0)
-                                .with_padding_right(4.0)
-                                .finish(),
-                        )
-                        .with_child(underline)
-                        .with_main_axis_size(MainAxisSize::Min)
-                        .finish(),
-                )
-                .with_padding_right(16.0)
-                .finish()
+                let label_box = Container::new(label_el)
+                    .with_padding_left(4.0)
+                    .with_padding_right(4.0)
+                    .with_padding_bottom(6.0)
+                    .with_border(Border::bottom(2.0).with_border_fill(underline_color))
+                    .finish();
+                Container::new(label_box).with_padding_right(16.0).finish()
             })
             .with_cursor(Cursor::PointingHand)
             .on_click(move |ctx, _, _| ctx.dispatch_typed_action(SshServerAction::SelectTab(tab)))
