@@ -190,6 +190,19 @@ pub struct SshServerView {
     /// One delete-button state per row in `port_forwards`, kept in sync on
     /// add/delete/reload.
     fwd_delete_btn_states: Vec<MouseStateHandle>,
+
+    // --- Phase 3: `~/.ssh/config` as single source ---
+    /// Resolved path of the config file being edited (None if it cannot be located).
+    config_path: Option<std::path::PathBuf>,
+    /// True when `node_id` does not (yet) match a `Host` block — the editor is
+    /// creating a brand-new host and Save will append a new `Host` block.
+    is_new_host: bool,
+    /// The host alias as loaded; used to detect a rename on Save (the `name`
+    /// field IS the alias under the config model).
+    original_alias: String,
+    /// `ProxyJump` directive preserved across edits (the editor does not expose
+    /// it but Save must not drop it).
+    proxy_jump: Option<String>,
 }
 
 impl SshServerView {
@@ -311,6 +324,10 @@ impl SshServerView {
             fwd_kind_dynamic_btn_state: MouseStateHandle::default(),
             fwd_add_btn_state: MouseStateHandle::default(),
             fwd_delete_btn_states: Vec::new(),
+            config_path: None,
+            is_new_host: false,
+            original_alias: String::new(),
+            proxy_jump: None,
         };
         me.reload(ctx);
 
@@ -389,42 +406,89 @@ impl SshServerView {
 
     /// 从 DB 读节点 + server,把当前 buffer 写入各 editor。
     fn reload(&mut self, ctx: &mut ViewContext<Self>) {
-        let id = self.node_id.clone();
-        let result = warp_ssh_manager::with_conn(|c| {
-            let nodes = SshRepository::list_nodes(c)?;
-            let node = nodes.iter().find(|n| n.id == id).cloned();
-            let server = match node.as_ref().map(|n| n.kind) {
-                Some(NodeKind::Server) => SshRepository::get_server(c, &id)?,
-                _ => None,
+        // Phase 3: the editor reads/writes `~/.ssh/config` directly. `node_id` is
+        // the host alias (see `config_tree::server_node`); an alias that matches
+        // no `Host` block puts the editor in "new host" mode.
+        let alias = self.node_id.clone();
+        self.original_alias = alias.clone();
+        let path = warp_ssh_manager::default_ssh_config_path();
+        self.config_path = path.clone();
+        let doc = path
+            .as_ref()
+            .and_then(|p| match warp_ssh_manager::load_document_from(p) {
+                Ok(doc) => Some(doc),
+                Err(e) => {
+                    log::error!("ssh_server_view: load config failed: {e:?}");
+                    None
+                }
+            });
+
+        // Groups become the folder choices in the group dropdown.
+        self.folders = doc
+            .as_ref()
+            .map(|d| {
+                d.groups()
+                    .into_iter()
+                    .map(|g| (g.uuid, g.name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let host = doc.as_ref().and_then(|d| d.host_view(&alias));
+        self.is_new_host = host.is_none();
+        // OneKey is a SQLite-only concept and has no place in the config model.
+        self.onekey_credentials = Vec::new();
+        self.selected_onekey_credential_id = None;
+
+        // Build a synthetic `SshServerInfo` from the decoded host so the
+        // connect/test code paths (which already read `self.server`) keep working.
+        let server = host.as_ref().map(|h| {
+            let key_path = h.identity_file.clone().filter(|p| !p.is_empty());
+            let auth_type = if key_path.is_some() {
+                AuthType::Key
+            } else {
+                AuthType::Password
             };
-            // 收集所有 folder 节点(id, name)
-            let folders: Vec<(String, String)> = nodes
+            let port_forwards = h
+                .forwards
                 .iter()
-                .filter(|n| matches!(n.kind, NodeKind::Folder))
-                .map(|n| (n.id.clone(), n.name.clone()))
-                .collect();
-            let onekey_credentials = SshRepository::list_onekey_credentials(c)?;
-            Ok((node, server, folders, onekey_credentials))
+                .filter_map(|f| PortForward::from_config_spec(f.kind, &f.spec))
+                .collect::<Vec<_>>();
+            SshServerInfo {
+                node_id: alias.clone(),
+                host: h.hostname.clone().unwrap_or_else(|| alias.clone()),
+                port: h.port.unwrap_or(22),
+                username: h.user.clone().unwrap_or_default(),
+                auth_type,
+                key_path,
+                credential_id: None,
+                startup_command: None,
+                notes: h.description.clone(),
+                last_connected_at: None,
+                advanced: SshAdvancedConfig {
+                    port_forwards,
+                    imported_from: None,
+                },
+            }
         });
-        match result {
-            Ok((node, server, folders, onekey_credentials)) => {
-                self.original_parent_id = node.as_ref().and_then(|n| n.parent_id.clone());
-                self.current_group_id = self.original_parent_id.clone();
-                self.node = node;
-                self.server = server;
-                self.folders = folders;
-                self.onekey_credentials = onekey_credentials;
-            }
-            Err(e) => {
-                log::error!("ssh_server_view: reload failed: {e:?}");
-                self.node = None;
-                self.server = None;
-                self.folders = Vec::new();
-                self.onekey_credentials = Vec::new();
-                self.original_parent_id = None;
-                self.current_group_id = None;
-            }
-        }
+        self.proxy_jump = host.as_ref().and_then(|h| h.proxy_jump.clone());
+        self.original_parent_id = host.as_ref().and_then(|h| h.group.clone());
+        self.current_group_id = self.original_parent_id.clone();
+        // This view only ever edits hosts, so synthesize a `Server` node so the
+        // form renders (the render gate keys off `node.kind`). A new host (alias
+        // not yet on disk) still shows the empty form rather than "not found".
+        let epoch = chrono::DateTime::UNIX_EPOCH.naive_utc();
+        self.node = Some(SshNode {
+            id: alias.clone(),
+            parent_id: self.current_group_id.clone(),
+            kind: NodeKind::Server,
+            name: alias.clone(),
+            sort_order: 0,
+            created_at: epoch,
+            updated_at: epoch,
+            is_collapsed: false,
+        });
+        self.server = server;
 
         // Load the working copy of port forwards from the (re)loaded server.
         self.set_port_forwards(
@@ -434,19 +498,20 @@ impl SshServerView {
                 .unwrap_or_default(),
         );
 
-        // 把节点名 / server 字段写入 editor buffer
-        let name = self
-            .node
-            .as_ref()
-            .map(|n| n.name.clone())
-            .unwrap_or_default();
+        // The "name" field IS the host alias under the config model.
+        let name = self.node_id.clone();
         self.name_editor
             .update(ctx, |e, ctx| e.set_buffer_text(&name, ctx));
 
         if let Some(srv) = self.server.clone() {
             self.auth_type = srv.auth_type;
             self.selected_onekey_credential_id = srv.credential_id.clone();
-            let host = srv.host.clone();
+            // Show the raw `HostName` (empty when the block omits it) rather than
+            // the alias fallback baked into `srv.host` for the connect path.
+            let host = host
+                .as_ref()
+                .and_then(|h| h.hostname.clone())
+                .unwrap_or_default();
             let port_str = srv.port.to_string();
             let user = srv.username.clone();
             let key_path = srv.key_path.clone().unwrap_or_default();
@@ -716,14 +781,20 @@ impl SshServerView {
             return;
         }
 
-        let port: u16 = match port_str.trim().parse() {
-            Ok(p) => p,
-            Err(_) => {
-                self.status = Some(StatusBanner::Error(crate::t!(
-                    "workspace-left-panel-ssh-manager-error-port-invalid"
-                )));
-                ctx.notify();
-                return;
+        // An empty port field means "default" (22) — the config simply omits the
+        // `Port` directive. A non-empty but unparseable value is a real error.
+        let port: u16 = if port_str.trim().is_empty() {
+            22
+        } else {
+            match port_str.trim().parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    self.status = Some(StatusBanner::Error(crate::t!(
+                        "workspace-left-panel-ssh-manager-error-port-invalid"
+                    )));
+                    ctx.notify();
+                    return;
+                }
             }
         };
 
@@ -740,65 +811,111 @@ impl SshServerView {
             None
         };
 
+        let _ = credential_id; // OneKey is SQLite-only; not persisted to the config.
         let key_path = key_path_text.trim().to_string();
+        let key_path_opt = if key_path.is_empty() {
+            None
+        } else {
+            Some(key_path)
+        };
+
+        // The alias becomes the `Host` pattern; it cannot contain whitespace, or
+        // OpenSSH would parse the remainder as a second pattern.
+        let alias = name.clone();
+        if alias.split_whitespace().count() != 1 {
+            self.status = Some(StatusBanner::Error(crate::t!(
+                "workspace-left-panel-ssh-manager-error-name-required"
+            )));
+            ctx.notify();
+            return;
+        }
+
+        // Synthetic server info — used only for the Keychain password lookup
+        // (indexed by alias) further down; it is never written to SQLite.
         let info = SshServerInfo {
-            node_id: self.node_id.clone(),
+            node_id: alias.clone(),
             host: host.trim().to_string(),
             port,
             username: user.trim().to_string(),
             auth_type: self.auth_type,
-            key_path: if key_path.is_empty() {
-                None
-            } else {
-                Some(key_path)
-            },
-            credential_id,
-            startup_command: if startup_command_text.trim().is_empty() {
-                None
-            } else {
-                Some(startup_command_text.trim().to_string())
-            },
-            notes: if notes_text.trim().is_empty() {
-                None
-            } else {
-                Some(notes_text.trim().to_string())
-            },
-            last_connected_at: self.server.as_ref().and_then(|s| s.last_connected_at),
-            // Persist the port forwards edited in the Port forwarding tab. The
-            // bare config is rebuilt from the editor's working copy so changes
-            // are saved even before the next reload.
-            advanced: SshAdvancedConfig {
-                port_forwards: self.port_forwards.clone(),
-                // Preserve `~/.ssh/config` import provenance across edits; the
-                // editor does not expose it but it must survive a Save/Connect.
-                imported_from: self
-                    .server
-                    .as_ref()
-                    .and_then(|s| s.advanced.imported_from.clone()),
-            },
+            key_path: key_path_opt.clone(),
+            credential_id: None,
+            startup_command: None,
+            notes: None,
+            last_connected_at: None,
+            advanced: SshAdvancedConfig::default(),
         };
 
-        // 2. 写 DB(rename + update_server + 可能的 move_node)
-        let id = self.node_id.clone();
-        let info_for_db = info.clone();
-        let name_for_db = name.clone();
-        let group_changed = self.current_group_id != self.original_parent_id;
-        let new_parent_id = self.current_group_id.clone();
-        let result = warp_ssh_manager::with_conn(move |c| {
-            SshRepository::rename_node(c, &id, &name_for_db)?;
-            SshRepository::update_server(c, &info_for_db)?;
-            if group_changed {
-                let new_parent = new_parent_id.as_deref();
-                SshRepository::move_node_to_end(c, &id, new_parent)?;
+        // 2. Write the host to `~/.ssh/config` — the single source of truth.
+        let Some(config_path) = self.config_path.clone() else {
+            self.status = Some(StatusBanner::Error(
+                "Could not locate ~/.ssh/config".to_string(),
+            ));
+            ctx.notify();
+            return;
+        };
+        let _ = startup_command_text; // not modeled in the config (yet).
+        let host_trim = host.trim().to_string();
+        let user_trim = user.trim().to_string();
+        let notes_trim = notes_text.trim().to_string();
+        let forwards: Vec<warp_ssh_manager::ForwardEntry> = self
+            .port_forwards
+            .iter()
+            .filter_map(|f| {
+                f.to_config_spec()
+                    .map(|spec| warp_ssh_manager::ForwardEntry { kind: f.kind, spec })
+            })
+            .collect();
+        let fields = warp_ssh_manager::CoreHostFields {
+            hostname: if host_trim.is_empty() {
+                None
+            } else {
+                Some(host_trim)
+            },
+            user: if user_trim.is_empty() {
+                None
+            } else {
+                Some(user_trim)
+            },
+            // Only write a `Port` directive for non-default ports to keep the file tidy.
+            port: if port == 22 { None } else { Some(port) },
+            identity_file: key_path_opt.clone(),
+            proxy_jump: self.proxy_jump.clone(),
+            forwards,
+        };
+        let rename_from = (!self.is_new_host
+            && !self.original_alias.is_empty()
+            && self.original_alias != alias)
+            .then(|| self.original_alias.clone());
+        let group = self.current_group_id.clone();
+        let save_result = (|| -> std::io::Result<()> {
+            let mut doc = warp_ssh_manager::load_document_from(&config_path)?;
+            if let Some(old) = rename_from.as_deref() {
+                doc.rename_host(old, &alias);
             }
-            Ok(())
-        });
-        if let Err(e) = result {
-            log::error!("ssh_server_view: save failed: {e:?}");
+            doc.upsert_host(&alias, &fields);
+            doc.set_group(&alias, group.as_deref());
+            doc.set_description(
+                &alias,
+                if notes_trim.is_empty() {
+                    None
+                } else {
+                    Some(notes_trim.as_str())
+                },
+            );
+            warp_ssh_manager::save_document_atomic(&config_path, &doc)
+        })();
+        if let Err(e) = save_result {
+            log::error!("ssh_server_view: config save failed: {e:?}");
             self.status = Some(StatusBanner::Error(format!("{e}")));
             ctx.notify();
             return;
         }
+        // The host now exists on disk; future saves are edits, and the alias we
+        // just wrote becomes the baseline for rename detection.
+        self.node_id = alias.clone();
+        self.original_alias = alias;
+        self.is_new_host = false;
 
         // 3. 写 keychain(buffer 非空才覆盖)。auth_type 切到密码时如果用户没填,
         //    保留原有 keychain 条目;切到私钥时不动密码 entry(用户可单独删)。
@@ -865,7 +982,16 @@ impl SshServerView {
         let notes_text = self.current_text(&self.notes_editor.clone(), ctx);
 
         let port: u16 = port_str.trim().parse().unwrap_or(22);
-        let host = host.trim().to_string();
+        // When `HostName` is omitted (e.g. `Host github.com`), the alias itself is
+        // the destination, so fall back to it rather than rejecting the connection.
+        let host = {
+            let h = host.trim();
+            if h.is_empty() {
+                self.node_id.trim().to_string()
+            } else {
+                h.to_string()
+            }
+        };
         if host.is_empty() {
             self.status = Some(StatusBanner::Error(crate::t!(
                 "workspace-left-panel-ssh-manager-error-host-required"
@@ -925,7 +1051,16 @@ impl SshServerView {
         let credential_id = self.selected_onekey_credential_id.clone();
 
         let port: u16 = port_str.trim().parse().unwrap_or(22);
-        let host = host.trim().to_string();
+        // When `HostName` is omitted (e.g. `Host github.com`), the alias itself is
+        // the destination, so fall back to it rather than rejecting the connection.
+        let host = {
+            let h = host.trim();
+            if h.is_empty() {
+                self.node_id.trim().to_string()
+            } else {
+                h.to_string()
+            }
+        };
         if host.is_empty() {
             self.status = Some(StatusBanner::Error(crate::t!(
                 "workspace-left-panel-ssh-manager-error-host-required"

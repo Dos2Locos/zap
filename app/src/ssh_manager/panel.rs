@@ -30,8 +30,8 @@ use warpui::{
 };
 
 use warp_ssh_manager::{
-    AuthType, KeychainSecretStore, NodeKind, SecretKind, SshNode, SshRepository, SshSecretStore,
-    SshServerInfo,
+    AuthType, HostView, KeychainSecretStore, NodeKind, SecretKind, SshNode, SshRepository,
+    SshSecretStore, SshServerInfo,
 };
 
 use crate::editor::{
@@ -458,24 +458,24 @@ impl SshManagerPanel {
     }
 
     /// 新建文件夹。`parent` 为 None 时在根级创建。
-    fn on_add_folder_with_parent(&mut self, parent: Option<String>, ctx: &mut ViewContext<Self>) {
-        let result = warp_ssh_manager::with_conn(|c| {
-            let name = unique_name(c, parent.as_deref(), "New folder")?;
-            Ok(SshRepository::create_folder(c, parent.as_deref(), &name)?)
-        });
-        match result {
-            Ok(node) => {
-                let new_id = node.id.clone();
-                self.selected_id = Some(new_id.clone());
-                self.refresh_tree(ctx);
-                // 新建即重命名 — Drive 习惯。
-                self.enter_rename(new_id, true, ctx);
-            }
-            Err(e) => {
-                log::error!("ssh_manager: create folder failed: {e:?}");
-                ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
-            }
+    fn on_add_folder_with_parent(&mut self, _parent: Option<String>, ctx: &mut ViewContext<Self>) {
+        // SCE groups are flat (`#SCE_GROUP` markers), so `parent` is ignored. The
+        // group is created with a placeholder name and immediately put into rename
+        // mode, mirroring the previous Drive-style flow.
+        let mut new_uuid = String::new();
+        let created = self.save_config_mut(
+            |doc| {
+                new_uuid = doc.create_group("New folder");
+            },
+            ctx,
+        );
+        if !created {
+            return;
         }
+        self.selected_id = Some(new_uuid.clone());
+        self.refresh_tree(ctx);
+        // 新建即重命名 — Drive 习惯。
+        self.enter_rename(new_uuid, true, ctx);
     }
 
     /// 把 `~/.ssh/config` 中一条候选导入为新的 saved server。
@@ -753,31 +753,13 @@ impl SshManagerPanel {
     }
 
     fn on_add_server(&mut self, ctx: &mut ViewContext<Self>) {
-        let parent = self.parent_for_new_node();
-        let info_template = SshServerInfo::new_default(String::new());
-        let result = warp_ssh_manager::with_conn(|c| {
-            let name = unique_name(c, parent.as_deref(), "New server")?;
-            Ok(SshRepository::create_server(
-                c,
-                parent.as_deref(),
-                &name,
-                &info_template,
-            )?)
+        // Config model: a new host is not persisted until the editor's Save writes
+        // its `Host` block. Open the editor in "new host" mode (empty alias) so the
+        // user fills the alias and fields there, then Save appends the block.
+        self.selected_id = None;
+        ctx.emit(SshManagerPanelEvent::OpenServerEditor {
+            node_id: String::new(),
         });
-        match result {
-            Ok(node) => {
-                let new_id = node.id.clone();
-                self.selected_id = Some(new_id.clone());
-                self.refresh_tree(ctx);
-                // 服务器新建后打开中央编辑 pane(用户填字段)— 名字编辑跟字段
-                // 一起在那里改,不在树里内联编辑。
-                ctx.emit(SshManagerPanelEvent::OpenServerEditor { node_id: new_id });
-            }
-            Err(e) => {
-                log::error!("ssh_manager: create server failed: {e:?}");
-                ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
-            }
-        }
     }
 
     fn on_clone_server(&mut self, source_id: &str, ctx: &mut ViewContext<Self>) {
@@ -829,16 +811,31 @@ impl SshManagerPanel {
         let Some(id) = self.selected_id.clone() else {
             return;
         };
-        let result = warp_ssh_manager::with_conn(|c| Ok(SshRepository::delete_node(c, &id)?));
-        if let Err(e) = result {
-            log::error!("ssh_manager: delete failed: {e:?}");
-            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+        // Folders are `#SCE_GROUP` markers (id == uuid); hosts are `Host` blocks
+        // (id == alias). Deleting a group orphans its hosts to the root.
+        let is_folder = self
+            .nodes
+            .iter()
+            .any(|n| n.id == id && matches!(n.kind, NodeKind::Folder));
+        let del_id = id.clone();
+        if !self.save_config_mut(
+            move |doc| {
+                if is_folder {
+                    doc.delete_group(&del_id);
+                } else {
+                    doc.remove_host(&del_id);
+                }
+            },
+            ctx,
+        ) {
             return;
         }
-        let store = KeychainSecretStore;
-        let _ = store.delete(&id, SecretKind::Password);
-        let _ = store.delete(&id, SecretKind::Passphrase);
-        let _ = store.delete(&id, SecretKind::RootPassword);
+        if !is_folder {
+            let store = KeychainSecretStore;
+            let _ = store.delete(&id, SecretKind::Password);
+            let _ = store.delete(&id, SecretKind::Passphrase);
+            let _ = store.delete(&id, SecretKind::RootPassword);
+        }
 
         self.selected_id = None;
         self.refresh_tree(ctx);
@@ -863,10 +860,8 @@ impl SshManagerPanel {
         if !matches!(kind, Some(NodeKind::Server)) {
             return;
         }
-        let server = warp_ssh_manager::with_conn(|c| Ok(SshRepository::get_server(c, &id)?))
-            .ok()
-            .flatten();
-        if let Some(server) = server {
+        if let Some(host) = self.host_meta.get(&id) {
+            let server = server_info_from_host_view(&id, host);
             ctx.emit(SshManagerPanelEvent::OpenSftpPane {
                 node_id: id,
                 server,
@@ -875,14 +870,9 @@ impl SshManagerPanel {
     }
 
     fn dispatch_connect_for(&self, id: &str, ctx: &mut ViewContext<Self>) {
-        let kind = self.nodes.iter().find(|n| n.id == id).map(|n| n.kind);
-        if !matches!(kind, Some(NodeKind::Server)) {
-            return;
-        }
-        let server = warp_ssh_manager::with_conn(|c| Ok(SshRepository::get_server(c, id)?))
-            .ok()
-            .flatten();
-        if let Some(server) = server {
+        // Only host (Server) nodes are present in `host_meta`; folders are not.
+        if let Some(host) = self.host_meta.get(id) {
+            let server = server_info_from_host_view(id, host);
             ctx.emit(SshManagerPanelEvent::OpenSshTerminal {
                 node_id: id.to_string(),
                 server,
@@ -1085,13 +1075,29 @@ impl SshManagerPanel {
             ctx.notify();
             return;
         }
-        let result =
-            warp_ssh_manager::with_conn(|c| Ok(SshRepository::rename_node(c, &id, &new_name)?));
-        if let Err(e) = result {
-            log::error!("ssh_manager: rename failed: {e:?}");
-            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+        // Folder = `#SCE_GROUP` (id is the uuid, which is stable across a rename);
+        // host = `Host` block (id is the alias, which changes on rename).
+        let is_folder = self
+            .nodes
+            .iter()
+            .any(|n| n.id == id && matches!(n.kind, NodeKind::Folder));
+        let rename_id = id.clone();
+        let rename_to = new_name.clone();
+        if !self.save_config_mut(
+            move |doc| {
+                if is_folder {
+                    doc.rename_group(&rename_id, &rename_to);
+                } else {
+                    doc.rename_host(&rename_id, &rename_to);
+                }
+            },
+            ctx,
+        ) {
             return;
         }
+        // Keep the renamed node selected: a host's id becomes the new alias; a
+        // folder keeps its uuid.
+        self.selected_id = Some(if is_folder { id } else { new_name });
         // 新建文件夹重命名完成后清除选中，使下次"新建文件夹"创建在根级。
         if was_newly_created {
             self.selected_id = None;
@@ -1164,33 +1170,21 @@ impl SshManagerPanel {
             );
             return;
         }
-        // sort_order 取目标 parent 当前最大值 +1(排在末尾)。简化的方式:
-        // 用 i32::MAX/2 让 SQL 层把它放最后(后续 normalize)。这里走 SQL
-        // 查询拿真实 next_sort_order。
-        let result = warp_ssh_manager::with_conn(|c| {
-            use diesel::prelude::*;
-            use persistence::schema::ssh_nodes;
-            let max: Option<i32> = match new_parent_id.as_deref() {
-                Some(p) => ssh_nodes::table
-                    .filter(ssh_nodes::parent_id.eq(p))
-                    .select(diesel::dsl::max(ssh_nodes::sort_order))
-                    .first(c)?,
-                None => ssh_nodes::table
-                    .filter(ssh_nodes::parent_id.is_null())
-                    .select(diesel::dsl::max(ssh_nodes::sort_order))
-                    .first(c)?,
-            };
-            let next_sort = max.unwrap_or(-1) + 1;
-            Ok(SshRepository::move_node(
-                c,
-                &node_id,
-                new_parent_id.as_deref(),
-                next_sort,
-            )?)
-        });
-        if let Err(e) = result {
-            log::error!("ssh_manager: move failed: {e:?}");
-            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+        // The SCE group model is flat: only hosts carry group membership, and a
+        // `new_parent_id` is a group uuid (or `None` for the root). Moving a folder
+        // is not representable, so reject it.
+        if !self.host_meta.contains_key(&node_id) {
+            log::warn!("ssh_manager: moving a folder is not supported in the config model");
+            return;
+        }
+        let move_id = node_id.clone();
+        let new_group = new_parent_id.clone();
+        if !self.save_config_mut(
+            move |doc| {
+                doc.set_group(&move_id, new_group.as_deref());
+            },
+            ctx,
+        ) {
             return;
         }
         self.refresh_tree(ctx);
@@ -1201,6 +1195,36 @@ impl SshManagerPanel {
 
     fn parent_for_new_node(&self) -> Option<String> {
         resolve_parent_for_new_node(self.selected_id.as_deref(), &self.nodes)
+    }
+
+    /// Load `~/.ssh/config` fresh, apply `edit`, and write it back atomically.
+    /// Loading from disk (rather than mutating the cached `config_doc`) keeps Zap
+    /// consistent with concurrent edits from SSH Config Editor. Returns `true` on
+    /// success; on failure it logs, emits a `PersistenceError`, and returns `false`.
+    fn save_config_mut(
+        &mut self,
+        edit: impl FnOnce(&mut warp_ssh_manager::SshConfigDocument),
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(path) = self.config_path.clone() else {
+            let msg = "Could not locate ~/.ssh/config".to_string();
+            log::error!("ssh_manager: {msg}");
+            ctx.emit(SshManagerPanelEvent::PersistenceError(msg));
+            return false;
+        };
+        let result = (|| -> std::io::Result<()> {
+            let mut doc = warp_ssh_manager::load_document_from(&path)?;
+            edit(&mut doc);
+            warp_ssh_manager::save_document_atomic(&path, &doc)
+        })();
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!("ssh_manager: config write failed: {e:?}");
+                ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+                false
+            }
+        }
     }
 
     fn render_toolbar(
@@ -2879,6 +2903,14 @@ fn imported_server_info(
             }),
         },
     }
+}
+
+/// Build the `SshServerInfo` used to open a connection from a decoded config
+/// host. `alias` is the `Host` pattern (and the keychain lookup id); the
+/// connection command resolves the rest from these fields. When the block omits
+/// `HostName`, the alias itself is the destination so OpenSSH still resolves it.
+fn server_info_from_host_view(alias: &str, host: &HostView) -> SshServerInfo {
+    host.to_server_info(alias)
 }
 
 /// Localized label for a synced field, used in the modal's "field: old → new"
