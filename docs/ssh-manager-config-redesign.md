@@ -185,7 +185,46 @@ temporalmente desconectadas — se recablean en Fase 3.
   (`crates/warp_core/src/ui/icons.rs`) y el mapa nombre-de-etiqueta→color
   ("decisiones menores" punto 3).
 
-### Próximo paso
-Fase 3 (editor sobre el config en `server_view`: General + grupo/icono/color,
-port forwarding → `LocalForward/...`, Save → `upsert_host` + setters SCE +
-password→Keychain, Nuevo → bloque `Host`, Play → `ssh <alias>`).
+### Fase 3 — Editor sobre el config (en curso)
+
+**Alcance acordado: núcleo primero.** Icono/color (selectores + mapas SCE→Zap)
+se posponen a una segunda tanda; el selector de **grupo** ya existe.
+
+Hallazgos clave de la sesión:
+- El `node_id` de un host en el árbol = **alias** (ver `config_tree::server_node`).
+- `ForwardEntry.spec` usa el **formato de fichero** (`8080 localhost:80`, `1080`),
+  no el CLI `-L`. Conversión `PortForward ↔ spec`:
+  `PortForward::to_config_spec()` / `from_config_spec(kind, spec)` en `types.rs`.
+- Conexión: ya hay dos rutas en `workspace/view.rs`:
+  `open_ssh_terminal(node_id, SshServerInfo)` (con inyección de secreto; si falla
+  `resolve_server_auth` en SQLite cae a usar el `node_id`=alias como lookup de
+  Keychain — **funciona para hosts del config**) y `open_ssh_alias_terminal(alias)`
+  (sin inyección). Para password-auth se usa la 1ª: construir `SshServerInfo`
+  desde los campos del editor y emitir `OpenSshTerminal{node_id: alias, server}`.
+- Password sigue en Keychain indexada por **alias** (= node_id).
+
+Progreso (núcleo completado ✅):
+- ✅ `PortForward::to_config_spec`/`from_config_spec` + 8 tests (types.rs).
+- ✅ Editor `server_view.rs`: `reload` lee `~/.ssh/config` (`load_document_from` +
+  `host_view(alias)`), construye un `SshServerInfo` sintético para los caminos de
+  connect/test, grupos desde `doc.groups()`, forwards desde `host_view`. `on_save`
+  → `upsert_host(CoreHostFields)` + `set_group` + `set_description` + `rename_host`
+  si cambió el alias + `save_document_atomic` + password→Keychain(alias). Host
+  nuevo: `node_id` vacío → modo nuevo (alias editable; puerto vacío = 22). Campo
+  Host vacío en connect/test cae al alias.
+- ✅ Panel `panel.rs`: helper `save_config_mut` (carga fresca + edit + guardado
+  atómico). `on_add_server` abre editor en modo nuevo (node_id ""),
+  `dispatch_connect_for`/`on_open_sftp` (SshServerInfo desde `host_meta[alias]` vía
+  `server_info_from_host_view`), `on_delete_selected` (remove_host/delete_group),
+  `commit_rename` (rename_host/rename_group), `on_move_node` (set_group, modelo
+  plano: solo hosts), `on_add_folder_with_parent` (create_group).
+- ✅ `cargo check -p warp --lib` limpio; clippy sin warnings nuevos; 159 tests del
+  crate + 74 de `warp::ssh_manager` verdes.
+
+Pendiente (segunda tanda / Fases 4-5):
+- **Icono/color** (selectores en el editor + mapas SCE→icono y nombre→color). Fila
+  del panel: pintar icono/color (dato ya en `host_meta`).
+- `on_clone_server` y todo el bloque **OneKey** siguen en SQLite y quedan
+  inservibles con el nuevo árbol — se eliminan en **Fase 5**.
+- Verificación E2E (`./script/run`): crear/editar/conectar/renombrar/mover, abrir
+  el config en SCE tras editar en Zap (interoperabilidad).
