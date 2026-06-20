@@ -769,6 +769,12 @@ impl SshServerView {
             // are saved even before the next reload.
             advanced: SshAdvancedConfig {
                 port_forwards: self.port_forwards.clone(),
+                // Preserve `~/.ssh/config` import provenance across edits; the
+                // editor does not expose it but it must survive a Save/Connect.
+                imported_from: self
+                    .server
+                    .as_ref()
+                    .and_then(|s| s.advanced.imported_from.clone()),
             },
         };
 
@@ -896,6 +902,12 @@ impl SshServerView {
             // are saved even before the next reload.
             advanced: SshAdvancedConfig {
                 port_forwards: self.port_forwards.clone(),
+                // Preserve `~/.ssh/config` import provenance across edits; the
+                // editor does not expose it but it must survive a Save/Connect.
+                imported_from: self
+                    .server
+                    .as_ref()
+                    .and_then(|s| s.advanced.imported_from.clone()),
             },
         };
         ctx.dispatch_typed_action(&crate::workspace::WorkspaceAction::OpenSshTerminal {

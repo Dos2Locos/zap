@@ -2719,6 +2719,28 @@ workspace-left-panel-ssh-manager-candidates-add = SSH マネージャーに追�
 workspace-left-panel-ssh-manager-candidates-added = 追加済み
 # TODO: review
 workspace-left-panel-ssh-manager-candidates-refresh = ~/.ssh/config から再読み込み
+# TODO: review
+workspace-left-panel-ssh-manager-candidates-sync = インポート済みホストを ~/.ssh/config と同期
+# TODO: review
+workspace-left-panel-ssh-manager-sync-title = ~/.ssh/config と同期
+# TODO: review
+workspace-left-panel-ssh-manager-sync-up-to-date = インポート済みホストはすべて最新です。
+# TODO: review
+workspace-left-panel-ssh-manager-sync-drift = エイリアスは ~/.ssh/config に存在しません
+# TODO: review
+workspace-left-panel-ssh-manager-sync-error = ~/.ssh/config を読み込めませんでした: { $error }
+# TODO: review
+workspace-left-panel-ssh-manager-sync-field-port = ポート
+# TODO: review
+workspace-left-panel-ssh-manager-sync-field-user = ユーザー
+# TODO: review
+workspace-left-panel-ssh-manager-sync-field-identity = 鍵
+# TODO: review
+workspace-left-panel-ssh-manager-sync-apply = 適用
+# TODO: review
+workspace-left-panel-ssh-manager-sync-cancel = キャンセル
+# TODO: review
+workspace-left-panel-ssh-manager-sync-close = 閉じる
 workspace-left-panel-ssh-manager-tab-general = 一般
 workspace-left-panel-ssh-manager-tab-forwarding = ポート転送
 workspace-left-panel-ssh-manager-forward-kind-local = ローカル

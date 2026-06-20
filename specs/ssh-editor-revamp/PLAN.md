@@ -173,7 +173,14 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
 > forward list with delete-per-row + add-forward row; forwards persisted into
 > `advanced.port_forwards` on Save/Connect). M4 done (connect to a
 > `~/.ssh/config` host by alias without importing: `ssh <alias>` in a new tab,
-> no node/keychain/injection). M5 pending. Resume at M5.
+> no node/keychain/injection). M5 done (one-way sync: import now records
+> `imported_from { path, alias }` provenance in `advanced`; new pure
+> `sync_config::compute_node_sync` diffs each imported node against the parsed
+> config — UpToDate / Drifted / Updated; a "Sync" header button re-reads the
+> config and opens a centered confirmation modal listing per-field changes
+> (port/user/identity) and drift warnings, applying updates via `update_server`
+> on confirm. Non-destructive: omitted directives keep current values; drift is
+> reported, never auto-deleted). All milestones complete.
 
 1. ✅ **DONE** — `feat(ssh_manager): add advanced_config JSON column + model/migration`
    — data model (`SshAdvancedConfig`, `PortForward`), migration
@@ -206,7 +213,19 @@ Existing: `load_candidates()` → `Vec<SshConfigCandidate>`, plus an import flow
    OpenSSH resolves the rest from the file).
    Verified: `cargo check -p warp` + `cargo test -p warp_ssh_manager` (3 new
    alias-command tests green).
-5. `feat(ssh_manager): sync imported nodes with ~/.ssh/config (one-way)`.
+5. ✅ **DONE** — `feat(ssh_manager): sync imported nodes with ~/.ssh/config
+   (one-way)` — `ImportProvenance { path, alias }` added to `SshAdvancedConfig`
+   and recorded on import (preserved across editor Save/Connect). New pure
+   `sync_config::compute_node_sync` returns `NotImported`/`UpToDate`/`Drifted`/
+   `Updated { changes, new_info }`, changing only fields the config declares
+   (port/user/identity) and flipping password→key auth when an IdentityFile is
+   added. A "Sync" button in the Candidates header re-reads the config and opens
+   a centered confirmation modal (`Apply`/`Cancel`) listing per-node field
+   diffs + drift warnings; Apply persists via `update_server`. New i18n keys
+   (en/zh-CN/ja).
+   Verified: `cargo check -p warp` + `cargo test -p warp_ssh_manager`
+   (116 passed, incl. 7 new sync tests) + `cargo test -p warp ssh_manager`
+   (74 passed) + `cargo clippy -p warp_ssh_manager` (no new warnings).
 
 Each milestone: `cargo check` + relevant tests green before committing.
 

@@ -9,6 +9,7 @@ pub mod repository;
 pub mod secrets;
 pub mod ssh_command;
 pub mod ssh_config_parser;
+pub mod sync_config;
 pub mod sync_provider;
 pub mod types;
 
@@ -23,11 +24,12 @@ pub use ssh_config_parser::{
     LoadOutcome, LoadResult, SshConfigCandidate, default_ssh_config_path, load_candidates,
     load_candidates_from, parse_ssh_config,
 };
+pub use sync_config::{FieldChange, NodeSyncStatus, SyncField, compute_node_sync};
 pub use sync_provider::{
     DbVersionStore, SshSyncData, SshSyncProvider, SyncNode, SyncOneKeyCredential, SyncServer,
 };
 pub use types::ConnectionStatus;
 pub use types::{
-    AuthType, NodeKind, OneKeyCredentialKind, PortForward, PortForwardKind, ResolvedSshAuth,
-    SshAdvancedConfig, SshNode, SshOneKeyCredential, SshServerInfo,
+    AuthType, ImportProvenance, NodeKind, OneKeyCredentialKind, PortForward, PortForwardKind,
+    ResolvedSshAuth, SshAdvancedConfig, SshNode, SshOneKeyCredential, SshServerInfo,
 };

@@ -147,6 +147,16 @@ impl PortForward {
     }
 }
 
+/// Records where a node was imported from in `~/.ssh/config`, so it can later be
+/// re-synced one-way (config → node). `path` is the config file that was read at
+/// import time; `alias` is the literal `Host` alias the node was created from
+/// (it also equals the node's `host` field — see the importer).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportProvenance {
+    pub path: String,
+    pub alias: String,
+}
+
 /// Extensible per-server configuration persisted as a single JSON blob
 /// (`ssh_servers.advanced_config`). New options (jump host, X11/agent forwarding,
 /// ciphers, tab color, ...) are added here without a new migration per option.
@@ -154,11 +164,15 @@ impl PortForward {
 pub struct SshAdvancedConfig {
     #[serde(default)]
     pub port_forwards: Vec<PortForward>,
+    /// Set when the node was imported from `~/.ssh/config`; `None` for manually
+    /// created nodes. Enables the one-way "Sync with ~/.ssh/config" action.
+    #[serde(default)]
+    pub imported_from: Option<ImportProvenance>,
 }
 
 /// Connection configuration for a server node. `password` / `passphrase` are
 /// not stored here — they go through the keychain.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshServerInfo {
     pub node_id: String,
     pub host: String,
@@ -292,6 +306,7 @@ mod tests {
     fn advanced_config_json_round_trip() {
         let cfg = SshAdvancedConfig {
             port_forwards: vec![forward(PortForwardKind::Local)],
+            imported_from: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: SshAdvancedConfig = serde_json::from_str(&json).unwrap();
@@ -302,5 +317,28 @@ mod tests {
     fn advanced_config_default_deserializes_from_empty_object() {
         let back: SshAdvancedConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(back, SshAdvancedConfig::default());
+    }
+
+    #[test]
+    fn advanced_config_without_imported_from_defaults_to_none() {
+        // Legacy rows written before M5 only carry `port_forwards`; the new
+        // `imported_from` field must default to None rather than fail to parse.
+        let back: SshAdvancedConfig =
+            serde_json::from_str(r#"{"port_forwards":[]}"#).unwrap();
+        assert_eq!(back.imported_from, None);
+    }
+
+    #[test]
+    fn advanced_config_with_provenance_round_trips() {
+        let cfg = SshAdvancedConfig {
+            port_forwards: vec![],
+            imported_from: Some(ImportProvenance {
+                path: "/home/me/.ssh/config".into(),
+                alias: "prodbox".into(),
+            }),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: SshAdvancedConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
     }
 }

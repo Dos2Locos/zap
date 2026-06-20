@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use pathfinder_geometry::vector::Vector2F;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    AcceptedByDropTarget, Border, ChildAnchor, ConstrainedBox, Container, CornerRadius,
+    AcceptedByDropTarget, Align, Border, ChildAnchor, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, Dismiss, Draggable, DraggableState, DropTarget, DropTargetData, Element,
     Empty, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
     ParentAnchor, ParentElement, ParentOffsetBounds, Radius, SavePosition, Stack, Text,
@@ -109,6 +109,13 @@ pub enum SshManagerPanelAction {
     RefreshCandidates,
     /// 折叠/展开 "Candidates" 区段(列表长时手动收起)。
     ToggleCandidatesSection,
+    /// Re-parse `~/.ssh/config` and compute the one-way (config → node) diff for
+    /// every imported node, then open the confirmation modal (M5).
+    SyncWithConfig,
+    /// Confirm the sync preview: persist every updated node.
+    ApplySync,
+    /// Cancel / close the sync preview modal.
+    DismissSyncPreview,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +168,48 @@ struct CandidateRowColors {
     muted: warp_core::ui::theme::Fill,
 }
 
+/// One node's row in the "Sync with ~/.ssh/config" confirmation modal (M5).
+struct SyncEntry {
+    node_name: String,
+    kind: SyncEntryKind,
+}
+
+// `Updated` carries a full `SshServerInfo` (large); the value is short-lived
+// (shown in the modal, then persisted or dropped), so boxing it is not worth
+// the churn.
+#[allow(clippy::large_enum_variant)]
+enum SyncEntryKind {
+    /// The config provides values differing from the node; `new_info` is ready
+    /// to persist verbatim once the user confirms.
+    Updated {
+        changes: Vec<warp_ssh_manager::FieldChange>,
+        new_info: SshServerInfo,
+    },
+    /// The provenance alias is no longer present in the config. Reported as a
+    /// warning; the node is never auto-deleted.
+    Drifted,
+}
+
+/// State backing the sync confirmation modal. `None` when the modal is closed.
+struct SyncPreview {
+    /// Updated + drifted entries only; up-to-date and non-imported nodes are
+    /// omitted so the modal shows just what is actionable.
+    entries: Vec<SyncEntry>,
+    /// Set when `~/.ssh/config` could not be read; the modal shows this error
+    /// instead of a diff.
+    error: Option<String>,
+}
+
+impl SyncPreview {
+    /// Number of nodes that would actually change on Apply (excludes drift).
+    fn updatable_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.kind, SyncEntryKind::Updated { .. }))
+            .count()
+    }
+}
+
 /// 拖拽落点 metadata。`parent_id = None` 表示拖到 panel 空白处(放回 root);
 /// `Some(folder_id)` 表示拖进该文件夹;**不允许**直接拖到 server 上(server
 /// 不能有 children)— 这种情况 drop_data 解释为"拖到 server 的兄弟位置",即
@@ -206,6 +255,13 @@ pub struct SshManagerPanel {
     /// 区段头的 Refresh / Toggle 按钮 hover state。
     candidates_refresh_btn: MouseStateHandle,
     candidates_toggle_btn: MouseStateHandle,
+    /// Section-header "Sync with ~/.ssh/config" button hover state (M5).
+    candidates_sync_btn: MouseStateHandle,
+    /// Pending one-way sync confirmation; `None` when the modal is closed.
+    sync_preview: Option<SyncPreview>,
+    /// Apply / Cancel button hover states for the sync confirmation modal.
+    sync_apply_btn: MouseStateHandle,
+    sync_cancel_btn: MouseStateHandle,
 }
 
 impl SshManagerPanel {
@@ -233,6 +289,10 @@ impl SshManagerPanel {
             candidate_connect_states: HashMap::new(),
             candidates_refresh_btn: MouseStateHandle::default(),
             candidates_toggle_btn: MouseStateHandle::default(),
+            candidates_sync_btn: MouseStateHandle::default(),
+            sync_preview: None,
+            sync_apply_btn: MouseStateHandle::default(),
+            sync_cancel_btn: MouseStateHandle::default(),
         };
         // 面板首次打开 → 立刻读一次 ssh_config(PRODUCT.md decision A)。
         me.candidates.update(ctx, |vm, ctx| vm.refresh(ctx));
@@ -402,7 +462,16 @@ impl SshManagerPanel {
             startup_command: None,
             notes: Some(format!("Imported from {path_display}")),
             last_connected_at: None,
-            advanced: Default::default(),
+            // Record provenance so the node can later be re-synced one-way from
+            // `~/.ssh/config` (M5). `path` is the config that was read; `alias`
+            // is the Host alias (also stored as `host`).
+            advanced: warp_ssh_manager::SshAdvancedConfig {
+                port_forwards: Vec::new(),
+                imported_from: Some(warp_ssh_manager::ImportProvenance {
+                    path: path_display.clone(),
+                    alias: c.alias.clone(),
+                }),
+            },
         };
 
         let parent = self.parent_for_new_node();
@@ -434,6 +503,115 @@ impl SshManagerPanel {
                 ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
             }
         }
+    }
+
+    /// Re-parse `~/.ssh/config` and compute the one-way diff for every imported
+    /// node, then open the confirmation modal. The file is re-read here (not the
+    /// cached candidate state) so the diff reflects the current config.
+    fn on_sync_with_config(&mut self, ctx: &mut ViewContext<Self>) {
+        let candidates = match warp_ssh_manager::load_candidates().outcome {
+            warp_ssh_manager::LoadOutcome::Loaded(v) => v,
+            // A missing file means every imported alias is now "missing" → drift.
+            warp_ssh_manager::LoadOutcome::NotFound => Vec::new(),
+            warp_ssh_manager::LoadOutcome::Error(msg) => {
+                self.sync_preview = Some(SyncPreview {
+                    entries: Vec::new(),
+                    error: Some(msg),
+                });
+                ctx.notify();
+                return;
+            }
+        };
+
+        let infos = warp_ssh_manager::with_conn(|c| {
+            let nodes = SshRepository::list_nodes(c)?;
+            let mut out = Vec::new();
+            for n in nodes {
+                if matches!(n.kind, NodeKind::Server) {
+                    if let Some(info) = SshRepository::get_server(c, &n.id)? {
+                        out.push((n.name, info));
+                    }
+                }
+            }
+            Ok(out)
+        });
+        let infos = match infos {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("ssh_manager: sync preview load failed: {e:?}");
+                ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+                return;
+            }
+        };
+
+        let mut entries = Vec::new();
+        for (node_name, info) in infos {
+            match warp_ssh_manager::compute_node_sync(&info, &candidates) {
+                // Not imported, or already matching the config → nothing to show.
+                None | Some(warp_ssh_manager::NodeSyncStatus::UpToDate) => {}
+                Some(warp_ssh_manager::NodeSyncStatus::Drifted { .. }) => {
+                    entries.push(SyncEntry {
+                        node_name,
+                        kind: SyncEntryKind::Drifted,
+                    });
+                }
+                Some(warp_ssh_manager::NodeSyncStatus::Updated { changes, new_info }) => {
+                    entries.push(SyncEntry {
+                        node_name,
+                        kind: SyncEntryKind::Updated { changes, new_info },
+                    });
+                }
+            }
+        }
+
+        self.sync_preview = Some(SyncPreview {
+            entries,
+            error: None,
+        });
+        ctx.notify();
+    }
+
+    /// Persist every updated node from the confirmed sync preview. Drift entries
+    /// are left untouched (config → node is non-destructive in Phase 1).
+    fn on_apply_sync(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(preview) = self.sync_preview.take() else {
+            return;
+        };
+        let updates: Vec<SshServerInfo> = preview
+            .entries
+            .into_iter()
+            .filter_map(|e| match e.kind {
+                SyncEntryKind::Updated { new_info, .. } => Some(new_info),
+                SyncEntryKind::Drifted => None,
+            })
+            .collect();
+        if updates.is_empty() {
+            ctx.notify();
+            return;
+        }
+
+        let result = warp_ssh_manager::with_conn(|c| {
+            for info in &updates {
+                SshRepository::update_server(c, info)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            log::error!("ssh_manager: apply sync failed: {e:?}");
+            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+            return;
+        }
+
+        self.refresh_tree(ctx);
+        SshTreeChangedNotifier::handle(ctx).update(ctx, |_, ctx| {
+            ctx.emit(SshTreeChangedEvent::TreeChanged);
+        });
+        ctx.notify();
+    }
+
+    fn on_dismiss_sync_preview(&mut self, ctx: &mut ViewContext<Self>) {
+        self.sync_preview = None;
+        ctx.notify();
     }
 
     fn on_add_server(&mut self, ctx: &mut ViewContext<Self>) {
@@ -1150,6 +1328,29 @@ impl SshManagerPanel {
             refresh_icon
         };
 
+        // Sync button — re-reads the config and re-applies it (one-way) to nodes
+        // imported from `~/.ssh/config`. A download glyph signals "config → node".
+        let sync_state = self.candidates_sync_btn.clone();
+        let sync_icon = ConstrainedBox::new(
+            crate::ui_components::icons::Icon::Download
+                .to_warpui_icon(icon_color)
+                .finish(),
+        )
+        .with_width(ITEM_ICON_SIZE)
+        .with_height(ITEM_ICON_SIZE)
+        .finish();
+        let sync_btn = Hoverable::new(sync_state, move |_| {
+            Container::new(sync_icon)
+                .with_uniform_padding(2.0)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.0)))
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(SshManagerPanelAction::SyncWithConfig);
+        })
+        .finish();
+
         // 整行:chevron + 标签(吃中间空间)+ count + Refresh 按钮。
         // 使用 MainAxisSize::Max 让整行填满面板宽度,消除右侧留白。
         let row = Flex::row()
@@ -1163,6 +1364,7 @@ impl SshManagerPanel {
                     .with_width(8.0)
                     .finish(),
             )
+            .with_child(sync_btn)
             .with_child(refresh_btn)
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::Start)
@@ -1789,6 +1991,214 @@ impl SshManagerPanel {
             })
             .finish()
     }
+
+    /// Render the "Sync with ~/.ssh/config" confirmation modal — a centered card
+    /// listing per-node field changes (and drift warnings) with Apply / Cancel.
+    fn render_sync_modal(
+        &self,
+        preview: &SyncPreview,
+        appearance: &warp_core::ui::appearance::Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let main = theme.main_text_color(theme.background());
+        let muted = theme.sub_text_color(theme.background());
+        let err_color: pathfinder_color::ColorU = theme.ui_error_color();
+
+        let mut body = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(6.0);
+
+        body.add_child(
+            Text::new_inline(
+                crate::t!("workspace-left-panel-ssh-manager-sync-title"),
+                appearance.ui_font_family(),
+                appearance.ui_font_subheading(),
+            )
+            .with_color(main.into())
+            .finish(),
+        );
+
+        if let Some(err) = preview.error.as_ref() {
+            body.add_child(
+                Text::new_inline(
+                    crate::t!("workspace-left-panel-ssh-manager-sync-error", error = err),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_body(),
+                )
+                .with_color(err_color)
+                .finish(),
+            );
+        } else if preview.entries.is_empty() {
+            body.add_child(
+                Text::new_inline(
+                    crate::t!("workspace-left-panel-ssh-manager-sync-up-to-date"),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_body(),
+                )
+                .with_color(muted.into())
+                .finish(),
+            );
+        } else {
+            for entry in &preview.entries {
+                body.add_child(
+                    Container::new(
+                        Text::new_inline(
+                            entry.node_name.clone(),
+                            appearance.ui_font_family(),
+                            appearance.ui_font_body(),
+                        )
+                        .with_color(main.into())
+                        .finish(),
+                    )
+                    .with_padding_top(4.0)
+                    .finish(),
+                );
+                match &entry.kind {
+                    SyncEntryKind::Updated { changes, .. } => {
+                        for change in changes {
+                            let label = sync_field_label(change.field);
+                            let line = format!("{label}: {} → {}", change.old, change.new);
+                            body.add_child(
+                                Container::new(
+                                    Text::new_inline(
+                                        line,
+                                        appearance.ui_font_family(),
+                                        appearance.ui_font_body(),
+                                    )
+                                    .with_color(muted.into())
+                                    .finish(),
+                                )
+                                .with_padding_left(FOLDER_DEPTH_INDENT)
+                                .finish(),
+                            );
+                        }
+                    }
+                    SyncEntryKind::Drifted => {
+                        body.add_child(
+                            Container::new(
+                                Text::new_inline(
+                                    crate::t!("workspace-left-panel-ssh-manager-sync-drift"),
+                                    appearance.ui_font_family(),
+                                    appearance.ui_font_body(),
+                                )
+                                .with_color(err_color)
+                                .finish(),
+                            )
+                            .with_padding_left(FOLDER_DEPTH_INDENT)
+                            .finish(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Buttons. Apply is shown only when there is something to persist; the
+        // dismiss button reads "Close" then, otherwise "Cancel".
+        let has_updates = preview.error.is_none() && preview.updatable_count() > 0;
+        let cancel_label = if has_updates {
+            crate::t!("workspace-left-panel-ssh-manager-sync-cancel")
+        } else {
+            crate::t!("workspace-left-panel-ssh-manager-sync-close")
+        };
+        let mut buttons = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_alignment(MainAxisAlignment::End)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_spacing(8.0)
+            .with_child(self.render_sync_button(
+                &cancel_label,
+                false,
+                appearance,
+                SshManagerPanelAction::DismissSyncPreview,
+                self.sync_cancel_btn.clone(),
+            ));
+        if has_updates {
+            buttons.add_child(self.render_sync_button(
+                &crate::t!("workspace-left-panel-ssh-manager-sync-apply"),
+                true,
+                appearance,
+                SshManagerPanelAction::ApplySync,
+                self.sync_apply_btn.clone(),
+            ));
+        }
+
+        let content = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(12.0)
+            .with_child(
+                ConstrainedBox::new(body.finish())
+                    .with_max_height(320.0)
+                    .finish(),
+            )
+            .with_child(buttons.finish())
+            .finish();
+
+        let card = Container::new(content)
+            .with_background(theme.surface_1())
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.0)))
+            .with_border(Border::all(1.0).with_border_fill(theme.surface_3()))
+            .with_uniform_padding(16.0)
+            .finish();
+        let sized = ConstrainedBox::new(card).with_max_width(360.0).finish();
+
+        Dismiss::new(sized)
+            .prevent_interaction_with_other_elements()
+            .on_dismiss(|ctx, _| {
+                ctx.dispatch_typed_action(SshManagerPanelAction::DismissSyncPreview);
+            })
+            .finish()
+    }
+
+    /// A single modal button. `is_accent` paints the primary (Apply) action.
+    fn render_sync_button(
+        &self,
+        label: &str,
+        is_accent: bool,
+        appearance: &warp_core::ui::appearance::Appearance,
+        action: SshManagerPanelAction,
+        mouse_state: MouseStateHandle,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let bg = if is_accent {
+            theme.accent()
+        } else {
+            theme.surface_2()
+        };
+        let text_color = if is_accent {
+            theme.background()
+        } else {
+            theme.active_ui_text_color()
+        };
+        let label_owned = label.to_string();
+        let ui_font = appearance.ui_font_family();
+        let ui_font_size = appearance.ui_font_body();
+
+        Hoverable::new(mouse_state, move |_| {
+            let text_el = Text::new_inline(label_owned.clone(), ui_font, ui_font_size)
+                .with_color(text_color.into())
+                .finish();
+            let centered = Flex::row()
+                .with_main_axis_alignment(MainAxisAlignment::Center)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_child(text_el)
+                .finish();
+            Container::new(
+                ConstrainedBox::new(centered)
+                    .with_width(80.0)
+                    .with_height(30.0)
+                    .finish(),
+            )
+            .with_background(bg)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+            .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(action.clone());
+        })
+        .finish()
+    }
 }
 
 impl Entity for SshManagerPanel {
@@ -1846,6 +2256,9 @@ impl TypedActionView for SshManagerPanel {
                     .update(ctx, |vm, ctx| vm.toggle_expanded(ctx));
                 ctx.notify();
             }
+            SshManagerPanelAction::SyncWithConfig => self.on_sync_with_config(ctx),
+            SshManagerPanelAction::ApplySync => self.on_apply_sync(ctx),
+            SshManagerPanelAction::DismissSyncPreview => self.on_dismiss_sync_preview(ctx),
         }
     }
 }
@@ -1899,22 +2312,33 @@ impl View for SshManagerPanel {
 
         let positioned_panel = SavePosition::new(panel_content, SSH_PANEL_POSITION_ID).finish();
 
-        let Some(position) = self.context_menu_position else {
-            return positioned_panel;
-        };
+        let mut content = positioned_panel;
 
-        let menu_el = self.render_context_menu(appearance);
-        let positioning = OffsetPositioning::offset_from_parent(
-            position,
-            ParentOffsetBounds::ParentByPosition,
-            ParentAnchor::TopLeft,
-            ChildAnchor::TopLeft,
-        );
+        // Context menu overlay (anchored at the click position).
+        if let Some(position) = self.context_menu_position {
+            let menu_el = self.render_context_menu(appearance);
+            let positioning = OffsetPositioning::offset_from_parent(
+                position,
+                ParentOffsetBounds::ParentByPosition,
+                ParentAnchor::TopLeft,
+                ChildAnchor::TopLeft,
+            );
+            let mut stack = Stack::new();
+            stack.add_child(content);
+            stack.add_positioned_overlay_child(menu_el, positioning);
+            content = stack.finish();
+        }
 
-        let mut stack = Stack::new();
-        stack.add_child(positioned_panel);
-        stack.add_positioned_overlay_child(menu_el, positioning);
-        stack.finish()
+        // Sync confirmation modal overlay (centered).
+        if let Some(preview) = self.sync_preview.as_ref() {
+            let modal = self.render_sync_modal(preview, appearance);
+            let mut stack = Stack::new();
+            stack.add_child(content);
+            stack.add_overlay_child(Align::new(modal).finish());
+            content = stack.finish();
+        }
+
+        content
     }
 }
 
@@ -2005,6 +2429,22 @@ fn compute_depths(nodes: &[SshNode]) -> HashMap<String, usize> {
 /// 一次性拉所有 ssh_servers 行的 `host` 字段。失败时返回空 Vec —— 候选区段的
 /// "Added" 徽章在 SQLite 临时挂掉时就当成"没有任何已导入项"渲染,不至于让
 /// 整个面板崩。
+/// Localized label for a synced field, used in the modal's "field: old → new"
+/// lines.
+fn sync_field_label(field: warp_ssh_manager::SyncField) -> String {
+    match field {
+        warp_ssh_manager::SyncField::Port => {
+            crate::t!("workspace-left-panel-ssh-manager-sync-field-port")
+        }
+        warp_ssh_manager::SyncField::User => {
+            crate::t!("workspace-left-panel-ssh-manager-sync-field-user")
+        }
+        warp_ssh_manager::SyncField::IdentityFile => {
+            crate::t!("workspace-left-panel-ssh-manager-sync-field-identity")
+        }
+    }
+}
+
 fn list_server_hosts() -> Vec<String> {
     use diesel::prelude::*;
     use persistence::schema::ssh_servers;
