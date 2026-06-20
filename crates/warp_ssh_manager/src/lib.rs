@@ -5,6 +5,7 @@
 //! standalone.
 
 pub mod config_model;
+pub mod config_tree;
 pub mod db;
 pub mod repository;
 pub mod secrets;
@@ -18,6 +19,7 @@ pub use config_model::{
     CoreHostFields, ForwardEntry, Group, HostView, OutlineEntry, SshConfigDocument,
     load_document_from, save_document_atomic,
 };
+pub use config_tree::{SshConfigTree, build_config_tree};
 pub use db::{set_database_path, with_conn};
 pub use repository::{SshRepository, SshRepositoryError, SyncMetaRepository};
 pub use secrets::{KeychainSecretStore, SecretKind, SshSecretStore, SshSecretStoreError};

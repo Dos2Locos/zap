@@ -137,3 +137,55 @@ picker. Comprobar interoperabilidad: abrir el config en SCE tras editar en Zap.
 - Cómo ejecutar: `./script/run` (macOS empaqueta `.app`), `./script/run --dont-open`
   para recompilar sin abrir. Tests: `cargo nextest run --no-fail-fast --workspace
   --exclude command-signatures-v2`. Type-check rápido: `cargo check -p warp --lib`.
+
+## Progreso
+
+### Fase 1 — Modelo + writer round-trip ✅ (completada)
+
+Implementada en `crates/warp_ssh_manager/`:
+- **`config_model.rs`** (`SshConfigDocument`): parser/serializador **sin pérdidas** —
+  round-trip byte a byte (comentarios, líneas en blanco, indentación con tabs,
+  **casing** de directivas `localforward`/`LocalForward`, directivas no reconocidas
+  `IdentitiesOnly`/`IdentityAgent`, e `Include`/`Match` intactos). Lee/escribe
+  metadatos SCE (`#SCE_GROUP`, `#SCEGroup`, `#SCEIcon`, `#SCETags`, descripción).
+  - API: `groups`, `create_group` (UUID v4 mayúsculas estilo SCE), `rename_group`,
+    `delete_group` (huerfaniza hosts a la raíz); `host_view`, `outline`,
+    `upsert_host` (quirúrgico — no toca SCE ni directivas desconocidas),
+    `remove_host`, `rename_host`, `set_group`/`set_icon`/`set_color`/`set_description`.
+  - Directivas: `HostName, User, Port, IdentityFile, ProxyJump` + forwards repetibles.
+  - **Escritura atómica** `save_document_atomic`: backup `<path>.bak`, temp en el
+    mismo dir, permisos `0600`, `rename` final. Sin dep de runtime nueva (usa `uuid`).
+- **`config_tree.rs`** (`build_config_tree`): función **pura** que convierte el
+  documento en el `Vec<SshNode>` (carpetas desde grupos, servidores desde hosts,
+  con `parent_id`/`is_collapsed`) + mapa `alias → HostView`, agrupando por
+  `#SCE_GROUP` y respetando orden de documento; uuids colgantes → raíz.
+- Tests: 28 (`config_model`) + 7 (`config_tree`). `cargo test -p warp_ssh_manager`:
+  **151 passed**. Clippy limpio, fmt aplicado.
+
+### Fase 2 — Repointar el panel al config ✅ (núcleo de lectura cableado)
+
+En `app/src/ssh_manager/panel.rs`:
+- Campos nuevos en `SshManagerPanel`: `config_doc`, `config_path`, `host_meta`
+  (`alias → HostView`), `collapsed: HashSet<String>` (colapso en memoria, el config
+  no lo persiste).
+- `refresh_tree` lee de `~/.ssh/config` (`load_document_from` + `build_config_tree`)
+  en vez de `SshRepository::list_nodes`. Árbol agrupado por `#SCE_GROUP`.
+- `on_toggle_node_collapsed` / `on_toggle_all_folders`: colapso en `collapsed`.
+- `render`: sección de candidatos eliminada (fusionada en el árbol unificado).
+- Verificado: `cargo check -p warp --lib` sin errores/avisos; 19 tests del panel OK.
+
+**Estado intermedio (esperado):** el árbol **lee** del config; las acciones de
+**escritura/conexión** (`on_add_server`, `on_edit`, `on_delete_selected`,
+`commit_rename`, `on_move_node`, `on_connect`) siguen apuntando a SQLite y quedan
+temporalmente desconectadas — se recablean en Fase 3.
+
+**Pendiente de pulido en Fase 2 (no bloqueante):**
+- Pintar **icono y color por fila** en `render_row` (el dato ya está en
+  `self.host_meta[alias].icon/.color`). Falta el mapa SCE→iconos de Zap
+  (`crates/warp_core/src/ui/icons.rs`) y el mapa nombre-de-etiqueta→color
+  ("decisiones menores" punto 3).
+
+### Próximo paso
+Fase 3 (editor sobre el config en `server_view`: General + grupo/icono/color,
+port forwarding → `LocalForward/...`, Save → `upsert_host` + setters SCE +
+password→Keychain, Nuevo → bloque `Host`, Play → `ssh <alias>`).

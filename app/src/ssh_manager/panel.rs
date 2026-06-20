@@ -34,8 +34,6 @@ use warp_ssh_manager::{
     SshServerInfo,
 };
 
-use settings::Setting;
-
 use crate::editor::{
     EditorView, Event as EditorEvent, SingleLineEditorOptions, TextColors, TextOptions,
 };
@@ -120,7 +118,9 @@ pub enum SshManagerPanelAction {
     /// a checkbox.
     OpenImportAll,
     /// Toggle a candidate's checkbox in the "Import all" modal.
-    ToggleImportAllEntry { alias: String },
+    ToggleImportAllEntry {
+        alias: String,
+    },
     /// Confirm: import every checked candidate that is not already imported.
     ConfirmImportAll,
     /// Cancel / close the "Import all" modal.
@@ -265,6 +265,19 @@ pub struct SshManagerPanel {
     depths: HashMap<String, usize>,
     selected_id: Option<String>,
 
+    /// Phase 2: the tree is read from `~/.ssh/config` (grouped by `#SCE_GROUP`)
+    /// instead of SQLite. The parsed document is kept so future edits can write
+    /// back to the same file.
+    config_doc: warp_ssh_manager::SshConfigDocument,
+    /// The config path that was loaded, for error messages / future writes.
+    config_path: Option<std::path::PathBuf>,
+    /// Decoded host details keyed by alias (the server node id), for row
+    /// rendering (icon, color, hostname, …).
+    host_meta: HashMap<String, warp_ssh_manager::HostView>,
+    /// Collapsed folder uuids. The config has no collapse flag, so this UI-only
+    /// state lives in the panel.
+    collapsed: std::collections::HashSet<String>,
+
     add_folder_btn: MouseStateHandle,
     add_server_btn: MouseStateHandle,
     toggle_all_btn: MouseStateHandle,
@@ -315,6 +328,10 @@ impl SshManagerPanel {
             nodes: Vec::new(),
             depths: HashMap::new(),
             selected_id: None,
+            config_doc: warp_ssh_manager::SshConfigDocument::parse(""),
+            config_path: None,
+            host_meta: HashMap::new(),
+            collapsed: std::collections::HashSet::new(),
             add_folder_btn: MouseStateHandle::default(),
             add_server_btn: MouseStateHandle::default(),
             toggle_all_btn: MouseStateHandle::default(),
@@ -364,25 +381,33 @@ impl SshManagerPanel {
     }
 
     fn refresh_tree(&mut self, ctx: &mut ViewContext<Self>) {
-        match warp_ssh_manager::with_conn(|c| Ok(SshRepository::list_nodes(c)?)) {
-            Ok(nodes) => {
-                self.depths = compute_depths(&nodes);
-                self.nodes = sort_for_display(nodes, &self.depths);
-                if let Some(id) = self.selected_id.clone() {
-                    if !self.nodes.iter().any(|n| n.id == id) {
-                        self.selected_id = None;
-                    }
-                }
-                // 重命名中的节点若被外部删除,清掉 rename_state
-                if let Some(rs) = self.rename_state.as_ref() {
-                    if !self.nodes.iter().any(|n| n.id == rs.node_id) {
-                        self.rename_state = None;
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!("ssh_manager: failed to load tree: {e:?}");
+        // Phase 2: load the tree from `~/.ssh/config`, grouping hosts by their
+        // `#SCE_GROUP` markers into collapsible folders.
+        let path = warp_ssh_manager::default_ssh_config_path();
+        self.config_path = path.clone();
+        match path.as_deref().map(warp_ssh_manager::load_document_from) {
+            Some(Ok(doc)) => self.config_doc = doc,
+            Some(Err(e)) => {
+                log::error!("ssh_manager: failed to load ~/.ssh/config: {e}");
                 ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+            }
+            None => log::error!("ssh_manager: could not determine ~/.ssh/config path"),
+        }
+
+        let tree = warp_ssh_manager::build_config_tree(&self.config_doc, &self.collapsed);
+        self.host_meta = tree.hosts;
+        self.depths = compute_depths(&tree.nodes);
+        self.nodes = sort_for_display(tree.nodes, &self.depths);
+
+        if let Some(id) = self.selected_id.clone() {
+            if !self.nodes.iter().any(|n| n.id == id) {
+                self.selected_id = None;
+            }
+        }
+        // 重命名中的节点若被外部删除,清掉 rename_state
+        if let Some(rs) = self.rename_state.as_ref() {
+            if !self.nodes.iter().any(|n| n.id == rs.node_id) {
+                self.rename_state = None;
             }
         }
 
@@ -395,17 +420,6 @@ impl SshManagerPanel {
         for n in &self.nodes {
             self.row_states.entry(n.id.clone()).or_default();
             self.row_drag_states.entry(n.id.clone()).or_default();
-        }
-
-        // 树变化 → 重算 "Added" 集合(PRODUCT.md decision E)。"已导入"按
-        // `server.host == candidate.alias` 判定 —— 与 ImportCandidate 的写入
-        // 语义对齐(decision I:导入时 `server.host = alias`)。
-        let auto_discover = *SshSettings::as_ref(ctx).enable_ssh_auto_discovery.value();
-        if auto_discover {
-            let hosts = list_server_hosts();
-            self.candidates
-                .update(ctx, |vm, ctx| vm.on_tree_changed(hosts, ctx));
-            self.sync_candidate_row_states(ctx);
         }
 
         ctx.notify();
@@ -662,9 +676,7 @@ impl SshManagerPanel {
                 if let Some(p) = port {
                     parts.push(format!(":{p}"));
                 }
-                self.import_all_row_states
-                    .entry(alias.clone())
-                    .or_default();
+                self.import_all_row_states.entry(alias.clone()).or_default();
                 entries.push(ImportAllEntry {
                     alias,
                     subtitle: parts.concat(),
@@ -705,12 +717,13 @@ impl SshManagerPanel {
             .candidates
             .read(ctx, |vm, _| vm.path_display())
             .unwrap_or_default();
-        let candidates: Vec<warp_ssh_manager::SshConfigCandidate> = self.candidates.read(ctx, |vm, _| {
-            aliases
-                .iter()
-                .filter_map(|a| vm.find_candidate(a).cloned())
-                .collect()
-        });
+        let candidates: Vec<warp_ssh_manager::SshConfigCandidate> =
+            self.candidates.read(ctx, |vm, _| {
+                aliases
+                    .iter()
+                    .filter_map(|a| vm.find_candidate(a).cloned())
+                    .collect()
+            });
 
         let parent = self.parent_for_new_node();
         let result = warp_ssh_manager::with_conn(|conn| {
@@ -904,25 +917,10 @@ impl SshManagerPanel {
         if !matches!(kind, Some(NodeKind::Folder)) {
             return;
         }
-        let new_collapsed = !self
-            .nodes
-            .iter()
-            .find(|n| n.id == node_id)
-            .map(|n| n.is_collapsed)
-            .unwrap_or(false);
-        let id = node_id.to_string();
-        let result = warp_ssh_manager::with_conn(move |c| {
-            Ok(SshRepository::set_collapsed(c, &id, new_collapsed)?)
-        });
-        if let Err(e) = result {
-            log::error!("ssh_manager: toggle collapse failed: {e:?}");
-            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
-            return;
+        if !self.collapsed.remove(node_id) {
+            self.collapsed.insert(node_id.to_string());
         }
         self.refresh_tree(ctx);
-        SshTreeChangedNotifier::handle(ctx).update(ctx, |_, ctx| {
-            ctx.emit(SshTreeChangedEvent::TreeChanged);
-        });
     }
 
     /// 顶部按钮:任何 folder 当前是展开 → 全部折叠;全部都已折叠 → 全部展开。
@@ -931,19 +929,19 @@ impl SshManagerPanel {
             .nodes
             .iter()
             .any(|n| matches!(n.kind, NodeKind::Folder) && !n.is_collapsed);
-        let new_collapsed = any_expanded; // 至少一个展开 → 全收;否则全展
-        let result = warp_ssh_manager::with_conn(|c| {
-            Ok(SshRepository::set_all_folders_collapsed(c, new_collapsed)?)
-        });
-        if let Err(e) = result {
-            log::error!("ssh_manager: toggle all failed: {e:?}");
-            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
-            return;
+        if any_expanded {
+            // Collapse every folder.
+            self.collapsed = self
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Folder))
+                .map(|n| n.id.clone())
+                .collect();
+        } else {
+            // Expand all.
+            self.collapsed.clear();
         }
         self.refresh_tree(ctx);
-        SshTreeChangedNotifier::handle(ctx).update(ctx, |_, ctx| {
-            ctx.emit(SshTreeChangedEvent::TreeChanged);
-        });
     }
 
     /// 节点是否在视觉上可见 — 任一祖先 folder 是 collapsed 就隐藏。
@@ -2692,18 +2690,9 @@ impl View for SshManagerPanel {
             .with_uniform_padding(8.0)
             .finish();
 
-        // PRODUCT.md §2:Candidates 区段在已保存树**上方**,共享同一面板
-        // 水平内边距。区段在 view-model 还没 refresh 时返回 Empty,不会占
-        // 高度。自动发现关闭时不渲染区段。
-        let auto_discover = *SshSettings::as_ref(app).enable_ssh_auto_discovery.value();
-        let candidates_section = if auto_discover {
-            Container::new(self.render_candidates(appearance, app))
-                .with_padding_left(PANEL_HORIZONTAL_PADDING - ITEM_PADDING_HORIZONTAL)
-                .with_padding_right(PANEL_HORIZONTAL_PADDING - ITEM_PADDING_HORIZONTAL)
-                .finish()
-        } else {
-            Empty::new().finish()
-        };
+        // Phase 2: the separate "candidates" section is gone — every host from
+        // `~/.ssh/config` now lives in the unified grouped tree below.
+        let candidates_section = Empty::new().finish();
 
         let tree = Container::new(self.render_tree(appearance))
             .with_padding_left(PANEL_HORIZONTAL_PADDING - ITEM_PADDING_HORIZONTAL)
@@ -2859,7 +2848,10 @@ fn compute_depths(nodes: &[SshNode]) -> HashMap<String, usize> {
 /// Field mapping (PRODUCT.md decision I/J/K): `host = alias` (keeps OpenSSH
 /// alias semantics), `port = candidate.port.unwrap_or(22)`, `auth_type = Key`
 /// when an IdentityFile is present else `Password`, notes record the source path.
-fn imported_server_info(c: &warp_ssh_manager::SshConfigCandidate, path_display: &str) -> SshServerInfo {
+fn imported_server_info(
+    c: &warp_ssh_manager::SshConfigCandidate,
+    path_display: &str,
+) -> SshServerInfo {
     let auth_type = if c.identity_file.is_some() {
         AuthType::Key
     } else {
