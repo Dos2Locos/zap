@@ -5414,6 +5414,37 @@ impl Workspace {
     /// **shell bootstrap 时序**:`execute_command_or_set_pending` 把 ssh 命令
     /// 丢进 pending 队列,等 `BootstrapPrecmdDone` 事件再 flush —— 不会跟
     /// bootstrap 脚本拼到一起把 shell 整挂(2026-05-04 实测过)。
+    /// Map an SSH Config Editor color tag (`#SCETags`, e.g. `Purple`) to the
+    /// closest tab color. Unknown / `None` tags yield `None` (default color).
+    fn sce_tag_to_tab_color(tag: &str) -> Option<AnsiColorIdentifier> {
+        match tag.trim().to_ascii_lowercase().as_str() {
+            "red" => Some(AnsiColorIdentifier::Red),
+            // ANSI has no orange; yellow is the closest tab swatch.
+            "orange" | "yellow" => Some(AnsiColorIdentifier::Yellow),
+            "green" => Some(AnsiColorIdentifier::Green),
+            "blue" => Some(AnsiColorIdentifier::Blue),
+            "purple" => Some(AnsiColorIdentifier::Magenta),
+            "gray" | "grey" => Some(AnsiColorIdentifier::White),
+            _ => None,
+        }
+    }
+
+    /// Tint the active tab with the host's `~/.ssh/config` color tag, if any.
+    /// Called right after a connection tab is created (the new tab is active).
+    /// A host without a tag keeps the default tab color.
+    fn apply_config_tab_color(&mut self, alias: &str, ctx: &mut ViewContext<Self>) {
+        let color = warp_ssh_manager::default_ssh_config_path()
+            .and_then(|p| warp_ssh_manager::load_document_from(&p).ok())
+            .and_then(|doc| doc.host_view(alias).and_then(|h| h.color))
+            .and_then(|tag| Self::sce_tag_to_tab_color(&tag));
+        if let Some(color) = color {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
+                tab.selected_color = SelectedTabColor::Color(color);
+                ctx.notify();
+            }
+        }
+    }
+
     pub fn open_ssh_terminal(
         &mut self,
         node_id: String,
@@ -5460,6 +5491,9 @@ impl Workspace {
             DefaultSessionModeBehavior::Ignore,
             ctx,
         );
+
+        // Tint the new tab with the host's `~/.ssh/config` color tag (if set).
+        self.apply_config_tab_color(&node_id, ctx);
 
         // 拿新 tab 的 focused terminal view。
         let pane_group = self.active_tab_pane_group();
@@ -5568,6 +5602,9 @@ impl Workspace {
             log::warn!("open_ssh_alias_terminal: no terminal in newly added tab");
             return;
         };
+
+        // Tint the new tab with the host's `~/.ssh/config` color tag (if set).
+        self.apply_config_tab_color(alias, ctx);
 
         if AISettings::as_ref(ctx).default_session_mode(ctx) == DefaultSessionMode::Agent {
             terminal_view.update(ctx, |view, _| {

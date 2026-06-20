@@ -228,3 +228,16 @@ Pendiente (segunda tanda / Fases 4-5):
   inservibles con el nuevo árbol — se eliminan en **Fase 5**.
 - Verificación E2E (`./script/run`): crear/editar/conectar/renombrar/mover, abrir
   el config en SCE tras editar en Zap (interoperabilidad).
+
+### Fase 4 — Color de pestaña al conectar ✅
+
+En `app/src/workspace/view.rs`:
+- `sce_tag_to_tab_color`: mapa `#SCETags`→`AnsiColorIdentifier` (Red→Red,
+  Orange/Yellow→Yellow, Green→Green, Blue→Blue, Purple→Magenta, Gray→White;
+  None/desconocido → sin color).
+- `apply_config_tab_color(alias)`: lee el color del host en `~/.ssh/config` y, si
+  existe, fija `selected_color` de la pestaña activa recién creada. Invocado en
+  `open_ssh_terminal` y `open_ssh_alias_terminal`. Host sin etiqueta → color por
+  defecto. (El SFTP abre un pane, no una pestaña de terminal, así que no aplica.)
+- También localizado todo el módulo SFTP (en/ja/zh-CN) + prefijos de error vía
+  `SftpOpsError::localized()`.
