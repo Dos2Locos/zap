@@ -34,6 +34,21 @@ pub enum SftpOpsError {
     Cancelled,
 }
 
+impl SftpOpsError {
+    /// User-facing, localized rendering for toasts / status banners. Unlike
+    /// `Display` (kept locale-neutral for logs and unit tests), this composes a
+    /// translated category prefix with the already-localized detail message.
+    pub fn localized(&self) -> String {
+        match self {
+            SftpOpsError::Connection(msg) => crate::t!("sftp-ops-err-connection", msg = msg),
+            SftpOpsError::Operation(msg) => crate::t!("sftp-ops-err-operation", msg = msg),
+            SftpOpsError::LocalIo(msg) => crate::t!("sftp-ops-err-local-io", msg = msg),
+            SftpOpsError::NoCredentials(msg) => crate::t!("sftp-ops-err-no-credentials", msg = msg),
+            SftpOpsError::Cancelled => crate::t!("sftp-ops-err-cancelled"),
+        }
+    }
+}
+
 impl std::fmt::Display for SftpOpsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

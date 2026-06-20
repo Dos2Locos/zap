@@ -511,8 +511,8 @@ impl SftpBrowserView {
                                 }
                             }
                             Ok(Err(e)) => {
-                                me.connection = ConnectionState::Failed(e.to_string());
-                                me.show_error_toast(e.to_string(), ctx);
+                                me.connection = ConnectionState::Failed(e.localized());
+                                me.show_error_toast(e.localized(), ctx);
                             }
                             Err(_) => {
                                 // JoinError（被 abort 或 panic）
@@ -604,7 +604,7 @@ impl SftpBrowserView {
                         me.sync_row_mouse_handles();
                     }
                     Ok(Err(e)) => {
-                        me.show_error_toast(crate::t!("sftp-browser-list-dir-failed", error = e.to_string()), ctx);
+                        me.show_error_toast(crate::t!("sftp-browser-list-dir-failed", error = e.localized()), ctx);
                     }
                     Err(_) => {}
                 }
@@ -758,7 +758,7 @@ impl SftpBrowserView {
                         sftp.delete_file(path)
                     };
                     if let Err(e) = result {
-                        return Err(e.to_string());
+                        return Err(e.localized());
                     }
                 }
                 Ok(())
@@ -771,7 +771,7 @@ impl SftpBrowserView {
                         me.refresh_dir(ctx);
                     }
                     Ok(Err(e)) => {
-                        me.show_error_toast(crate::t!("sftp-browser-delete-failed", error = e.to_string()), ctx);
+                        me.show_error_toast(crate::t!("sftp-browser-delete-failed", error = e), ctx);
                         me.refresh_dir(ctx);
                     }
                     Err(_) => {
@@ -1154,7 +1154,7 @@ impl SftpBrowserView {
                                 if matches!(e, super::sftp_ops::SftpOpsError::Cancelled) {
                                     t.state = TransferState::Cancelled;
                                 } else {
-                                    t.state = TransferState::Failed(e.to_string());
+                                    t.state = TransferState::Failed(e.localized());
                                 }
                                 t.transferred = transferred.load(Ordering::SeqCst);
                             }
@@ -1175,7 +1175,7 @@ impl SftpBrowserView {
                         }
                         Ok(Err(e)) => {
                             log::error!("sftp: 上传失败: {e}");
-                            me.show_error_toast(crate::t!("sftp-browser-upload-failed", error = e.to_string()), ctx);
+                            me.show_error_toast(crate::t!("sftp-browser-upload-failed", error = e.localized()), ctx);
                             ctx.notify();
                         }
                         Err(_) => {
@@ -1250,7 +1250,7 @@ impl SftpBrowserView {
                                 if matches!(e, super::sftp_ops::SftpOpsError::Cancelled) {
                                     t.state = TransferState::Cancelled;
                                 } else {
-                                    t.state = TransferState::Failed(e.to_string());
+                                    t.state = TransferState::Failed(e.localized());
                                 }
                                 t.transferred = transferred.load(Ordering::SeqCst);
                             }
@@ -1266,7 +1266,7 @@ impl SftpBrowserView {
 
                     if let Ok(Err(e)) = &result {
                         log::error!("sftp: 下载失败: {e}");
-                        me.show_error_toast(crate::t!("sftp-browser-download-failed", error = e.to_string()), ctx);
+                        me.show_error_toast(crate::t!("sftp-browser-download-failed", error = e.localized()), ctx);
                     }
                     ctx.notify();
                 },
@@ -1490,7 +1490,7 @@ impl TypedActionView for SftpBrowserView {
                                         me.refresh_dir(ctx);
                                     }
                                     Ok(Err(e)) => {
-                                        me.show_error_toast(crate::t!("sftp-browser-rename-failed", error = e.to_string()), ctx);
+                                        me.show_error_toast(crate::t!("sftp-browser-rename-failed", error = e.localized()), ctx);
                                     }
                                     Err(_) => {}
                                 }
@@ -1532,7 +1532,7 @@ impl TypedActionView for SftpBrowserView {
                                         me.refresh_dir(ctx);
                                     }
                                     Ok(Err(e)) => {
-                                        me.show_error_toast(crate::t!("sftp-browser-create-folder-failed", error = e.to_string()), ctx);
+                                        me.show_error_toast(crate::t!("sftp-browser-create-folder-failed", error = e.localized()), ctx);
                                     }
                                     Err(_) => {}
                                 }
@@ -1654,7 +1654,7 @@ impl TypedActionView for SftpBrowserView {
                                         me.refresh_dir(ctx);
                                     }
                                     Ok(Err(e)) => {
-                                        me.show_error_toast(crate::t!("sftp-browser-move-failed", error = e.to_string()), ctx);
+                                        me.show_error_toast(crate::t!("sftp-browser-move-failed", error = e.localized()), ctx);
                                     }
                                     Err(_) => {}
                                 }
