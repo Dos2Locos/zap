@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    ConstrainedBox, Container, CrossAxisAlignment, Fill, Flex, Hoverable,
-    MouseStateHandle, ParentElement, SavePosition, Shrinkable, Text,
+    ConstrainedBox, Container, CrossAxisAlignment, Expanded, Fill, Flex, Hoverable, MainAxisSize,
+    MouseStateHandle, ParentElement, SavePosition, Text,
 };
 use warpui::platform::Cursor;
 use warpui::Element;
@@ -71,8 +71,9 @@ pub fn render_file_row(
         .with_height(16.0)
         .finish();
 
-        // 名称
-        let name_el = Shrinkable::new(
+        // 名称 — `Expanded`(FlexFit::Tight)填满名称列,把固定宽度的
+        // 大小/日期列推到右侧形成对齐的列。
+        let name_el = Expanded::new(
             1.0,
             Text::new_inline(name.clone(), ui_font, ui_font_size)
                 .with_color(text_color.into())
@@ -104,8 +105,10 @@ pub fn render_file_row(
         .with_width(FILE_DATE_WIDTH)
         .finish();
 
-        // 组装行内容
+        // 组装行内容。`MainAxisSize::Max` 让本行填满可用宽度,使可伸缩的
+        // 名称列把固定宽度的大小/日期列推到右侧的对齐列。
         let row_content = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(8.0)
             .with_child(icon_el)
@@ -148,10 +151,17 @@ pub fn render_header(appearance: &Appearance) -> Box<dyn Element> {
     let theme = appearance.theme();
     let header_color = theme.sub_text_color(theme.background());
 
-    let name_el = Shrinkable::new(
+    // Empty placeholder matching the per-row icon column (16px) so the header
+    // labels line up with the file rows below (which start icon → name → …).
+    let icon_spacer = ConstrainedBox::new(Flex::row().finish())
+        .with_width(16.0)
+        .with_height(16.0)
+        .finish();
+
+    let name_el = Expanded::new(
         1.0,
         Text::new_inline(
-            String::from("名称"),
+            crate::t!("workspace-left-panel-ssh-manager-sftp-col-name"),
             appearance.ui_font_family(),
             appearance.ui_font_size(),
         )
@@ -162,7 +172,7 @@ pub fn render_header(appearance: &Appearance) -> Box<dyn Element> {
 
     let size_el = ConstrainedBox::new(
         Text::new_inline(
-            String::from("大小"),
+            crate::t!("workspace-left-panel-ssh-manager-sftp-col-size"),
             appearance.ui_font_family(),
             appearance.ui_font_size(),
         )
@@ -174,7 +184,7 @@ pub fn render_header(appearance: &Appearance) -> Box<dyn Element> {
 
     let date_el = ConstrainedBox::new(
         Text::new_inline(
-            String::from("修改时间"),
+            crate::t!("workspace-left-panel-ssh-manager-sftp-col-modified"),
             appearance.ui_font_family(),
             appearance.ui_font_size(),
         )
@@ -184,9 +194,13 @@ pub fn render_header(appearance: &Appearance) -> Box<dyn Element> {
     .with_width(FILE_DATE_WIDTH)
     .finish();
 
+    // Mirror `render_file_row` exactly: icon column + 8px spacing between every
+    // column, so header labels align with their row values.
     let header_row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_spacing(24.0) // 图标16 + 间距8
+        .with_spacing(8.0)
+        .with_child(icon_spacer)
         .with_child(name_el)
         .with_child(size_el)
         .with_child(date_el)

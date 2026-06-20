@@ -13,7 +13,7 @@ use std::sync::Arc;
 use pathfinder_geometry::vector::Vector2F;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::icons::Icon;
-use warp_ssh_manager::{KeychainSecretStore, SshRepository};
+use warp_ssh_manager::KeychainSecretStore;
 use warpui::elements::{
     Align, Border, ChildAnchor, ChildView, ClippedScrollStateHandle, ClippedScrollable,
     ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Element,
@@ -454,14 +454,16 @@ impl SftpBrowserView {
 
     /// 连接到 SSH 服务器并建立 SFTP 通道
     fn connect_to_server(&mut self, ctx: &mut ViewContext<Self>) {
+        // The host is read from `~/.ssh/config` (single source of truth): the
+        // node_id is the host alias, and the keychain (indexed by alias) supplies
+        // the secret during the connect below.
         let node_id = self.node_id.clone();
-        let result = warp_ssh_manager::with_conn(|c| {
-            let server = SshRepository::get_server(c, &node_id)?;
-            Ok(server)
-        });
+        let server = warp_ssh_manager::default_ssh_config_path()
+            .and_then(|p| warp_ssh_manager::load_document_from(&p).ok())
+            .and_then(|doc| doc.host_view(&node_id).map(|h| h.to_server_info(&node_id)));
 
-        match result {
-            Ok(Some(server)) => {
+        match server {
+            Some(server) => {
                 // 取消之前的连接尝试
                 if let Some(h) = self.connect_handle.take() {
                     h.abort();
@@ -515,14 +517,9 @@ impl SftpBrowserView {
                     },
                 );
             }
-            Ok(None) => {
+            None => {
                 self.connection = ConnectionState::Failed("未找到服务器配置".to_string());
                 self.show_error_toast("未找到服务器配置".to_string(), ctx);
-                ctx.notify();
-            }
-            Err(e) => {
-                self.connection = ConnectionState::Failed(format!("读取服务器配置失败: {e}"));
-                self.show_error_toast(format!("读取服务器配置失败: {e}"), ctx);
                 ctx.notify();
             }
         }
@@ -1020,23 +1017,14 @@ impl SftpBrowserView {
                 .finish();
         }
 
-        // 表头
-        let header = super::file_list::render_header(appearance);
-
-        // 文件行
-        let rows = super::file_list::render_file_rows(
+        // 文件行(不含表头 — 表头由调用方固定在滚动区之上,见 render_main)。
+        super::file_list::render_file_rows(
             &self.entries,
             &filtered_indices,
             &self.selected,
             &self.row_mouse_handles,
             appearance,
-        );
-
-        Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(header)
-            .with_child(rows)
-            .finish()
+        )
     }
 
     /// 渲染传输面板
@@ -1795,6 +1783,12 @@ impl View for SftpBrowserView {
         if self.is_loading {
             col.add_child(Shrinkable::new(1.0, self.render_loading(appearance)).finish());
         } else {
+            // Sticky header: stays fixed above the scrolling rows. The rows use an
+            // overlayed scrollbar so they keep the full content width and stay
+            // column-aligned with the header (a reserved scrollbar would shift the
+            // rows' right-hand columns 8px relative to the fixed header).
+            col.add_child(super::file_list::render_header(appearance));
+
             let file_list = self.render_file_list(appearance);
             let scrollbar_color = theme.disabled_text_color(theme.background()).into();
             let scrollbar_thumb_hover = theme.main_text_color(theme.background()).into();
@@ -1806,6 +1800,7 @@ impl View for SftpBrowserView {
                 scrollbar_thumb_hover,
                 Fill::None,
             )
+            .with_overlayed_scrollbar()
             .finish();
             col.add_child(Shrinkable::new(1.0, scrollable).finish());
         }

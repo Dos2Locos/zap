@@ -21,6 +21,10 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum AuthMethod {
     Password { password: String },
     PublicKey { key_path: PathBuf, passphrase: Option<String> },
+    /// Mirror the OpenSSH client's default behavior: try the SSH agent, then the
+    /// default identity files under `~/.ssh` (`id_ed25519`, `id_rsa`, …). Used
+    /// when a config host has neither an `IdentityFile` nor a stored password.
+    Agent,
 }
 
 /// SFTP 会话，封装 ssh2 连接
@@ -107,6 +111,12 @@ impl SftpSession {
                         }
                     })?;
             }
+            AuthMethod::Agent => {
+                // Try each method in turn like the ssh client does; per-method
+                // failures are non-fatal — the `authenticated()` check below is the
+                // single arbiter of overall success.
+                authenticate_with_agent_then_default_keys(&session, username);
+            }
         }
 
         if !session.authenticated() {
@@ -151,6 +161,45 @@ impl Drop for SftpSession {
             let _ = self.session.disconnect(None, "bye", None);
         }
     }
+}
+
+/// Attempt SSH-agent auth, then each default identity file under `~/.ssh`,
+/// stopping as soon as the session is authenticated. Mirrors the OpenSSH client
+/// default when no explicit key/password is configured. All errors are
+/// swallowed: the caller decides success via `session.authenticated()`.
+fn authenticate_with_agent_then_default_keys(session: &ssh2::Session, username: &str) {
+    // 1. SSH agent (handles passphrase-protected keys transparently).
+    if session.userauth_agent(username).is_ok() && session.authenticated() {
+        return;
+    }
+
+    // 2. Default identity files, in the same rough preference order ssh uses.
+    let Some(home) = home_dir() else {
+        return;
+    };
+    const DEFAULT_KEYS: [&str; 4] = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
+    for name in DEFAULT_KEYS {
+        let key_path = home.join(".ssh").join(name);
+        if !key_path.exists() {
+            continue;
+        }
+        // No passphrase: encrypted default keys are expected to go through the
+        // agent above; a prompt-less attempt simply fails and we move on.
+        if session
+            .userauth_pubkey_file(username, None, &key_path, None)
+            .is_ok()
+            && session.authenticated()
+        {
+            return;
+        }
+    }
+}
+
+/// Best-effort home directory from the environment (`HOME`, then `USERPROFILE`).
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// 判断 ssh2 错误是否为超时错误

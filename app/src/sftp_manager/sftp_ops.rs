@@ -465,7 +465,7 @@ pub fn download_dir_recursive(
 
 /// 根据服务器配置构建认证方式
 fn build_auth_method(
-    server: &SshServerInfo,
+    _server: &SshServerInfo,
     resolved_auth: &ResolvedSshAuth,
     secret_store: &dyn SshSecretStore,
 ) -> Result<AuthMethod, SftpOpsError> {
@@ -473,13 +473,15 @@ fn build_auth_method(
         AuthType::Password | AuthType::OneKey => {
             let password = secret_store
                 .get(&resolved_auth.secret_lookup_id, resolved_auth.secret_kind)
-                .map_err(|e| SftpOpsError::NoCredentials(format!("读取密码失败: {e}")))?
-                .ok_or_else(|| {
-                    SftpOpsError::NoCredentials(format!("服务器 {} 未存储密码", server.host))
-                })?;
-            Ok(AuthMethod::Password {
-                password: password.to_string(),
-            })
+                .map_err(|e| SftpOpsError::NoCredentials(format!("读取密码失败: {e}")))?;
+            match password {
+                Some(password) => Ok(AuthMethod::Password {
+                    password: password.to_string(),
+                }),
+                // No stored password and no IdentityFile → behave like the ssh
+                // client: try the agent and the default `~/.ssh` keys.
+                None => Ok(AuthMethod::Agent),
+            }
         }
         AuthType::Key => {
             let key_path = resolved_auth.key_path.as_ref().ok_or_else(|| {
