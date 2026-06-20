@@ -116,6 +116,15 @@ pub enum SshManagerPanelAction {
     ApplySync,
     /// Cancel / close the sync preview modal.
     DismissSyncPreview,
+    /// Open the "Import all" modal listing every `~/.ssh/config` candidate with
+    /// a checkbox.
+    OpenImportAll,
+    /// Toggle a candidate's checkbox in the "Import all" modal.
+    ToggleImportAllEntry { alias: String },
+    /// Confirm: import every checked candidate that is not already imported.
+    ConfirmImportAll,
+    /// Cancel / close the "Import all" modal.
+    DismissImportAll,
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +219,32 @@ impl SyncPreview {
     }
 }
 
+/// One candidate row in the "Import all" modal: a checkbox + summary. Rows that
+/// are already imported are shown disabled.
+struct ImportAllEntry {
+    alias: String,
+    subtitle: String,
+    already_added: bool,
+    selected: bool,
+}
+
+/// State backing the "Import all" modal (check/uncheck candidates to import).
+/// `None` when the modal is closed.
+struct ImportAllState {
+    entries: Vec<ImportAllEntry>,
+}
+
+impl ImportAllState {
+    /// Aliases that are checked and not already imported — the actual work set.
+    fn selected_aliases(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|e| e.selected && !e.already_added)
+            .map(|e| e.alias.clone())
+            .collect()
+    }
+}
+
 /// 拖拽落点 metadata。`parent_id = None` 表示拖到 panel 空白处(放回 root);
 /// `Some(folder_id)` 表示拖进该文件夹;**不允许**直接拖到 server 上(server
 /// 不能有 children)— 这种情况 drop_data 解释为"拖到 server 的兄弟位置",即
@@ -262,6 +297,14 @@ pub struct SshManagerPanel {
     /// Apply / Cancel button hover states for the sync confirmation modal.
     sync_apply_btn: MouseStateHandle,
     sync_cancel_btn: MouseStateHandle,
+    /// Pending "Import all" selection; `None` when the modal is closed.
+    import_all: Option<ImportAllState>,
+    /// "Import all…" trigger row + modal Import / Cancel button hover states.
+    import_all_open_btn: MouseStateHandle,
+    import_all_confirm_btn: MouseStateHandle,
+    import_all_cancel_btn: MouseStateHandle,
+    /// Per-candidate checkbox row hover states in the "Import all" modal.
+    import_all_row_states: HashMap<String, MouseStateHandle>,
 }
 
 impl SshManagerPanel {
@@ -293,6 +336,11 @@ impl SshManagerPanel {
             sync_preview: None,
             sync_apply_btn: MouseStateHandle::default(),
             sync_cancel_btn: MouseStateHandle::default(),
+            import_all: None,
+            import_all_open_btn: MouseStateHandle::default(),
+            import_all_confirm_btn: MouseStateHandle::default(),
+            import_all_cancel_btn: MouseStateHandle::default(),
+            import_all_row_states: HashMap::new(),
         };
         // 面板首次打开 → 立刻读一次 ssh_config(PRODUCT.md decision A)。
         me.candidates.update(ctx, |vm, ctx| vm.refresh(ctx));
@@ -442,37 +490,7 @@ impl SshManagerPanel {
             .read(ctx, |vm, _| vm.path_display())
             .unwrap_or_default();
 
-        let auth_type = if c.identity_file.is_some() {
-            AuthType::Key
-        } else {
-            AuthType::Password
-        };
-        let info = SshServerInfo {
-            node_id: String::new(),
-            // PRODUCT.md decision I:存别名而不是解析后的 HostName。
-            host: c.alias.clone(),
-            port: c.port.unwrap_or(22),
-            username: c.user.clone().unwrap_or_default(),
-            auth_type,
-            key_path: c
-                .identity_file
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-            credential_id: None,
-            startup_command: None,
-            notes: Some(format!("Imported from {path_display}")),
-            last_connected_at: None,
-            // Record provenance so the node can later be re-synced one-way from
-            // `~/.ssh/config` (M5). `path` is the config that was read; `alias`
-            // is the Host alias (also stored as `host`).
-            advanced: warp_ssh_manager::SshAdvancedConfig {
-                port_forwards: Vec::new(),
-                imported_from: Some(warp_ssh_manager::ImportProvenance {
-                    path: path_display.clone(),
-                    alias: c.alias.clone(),
-                }),
-            },
-        };
+        let info = imported_server_info(&c, &path_display);
 
         let parent = self.parent_for_new_node();
         let result = warp_ssh_manager::with_conn(|conn| {
@@ -611,6 +629,113 @@ impl SshManagerPanel {
 
     fn on_dismiss_sync_preview(&mut self, ctx: &mut ViewContext<Self>) {
         self.sync_preview = None;
+        ctx.notify();
+    }
+
+    /// Build the "Import all" modal state from the current candidate list. Every
+    /// not-yet-imported candidate starts checked; already-imported ones are
+    /// listed disabled so the user can see the full picture.
+    fn on_open_import_all(&mut self, ctx: &mut ViewContext<Self>) {
+        let rows = self.candidates.read(ctx, |vm, _| vm.rows());
+        let mut entries = Vec::new();
+        for row in rows {
+            if let CandidateRow::Candidate {
+                alias,
+                hostname,
+                user,
+                port,
+                added,
+                ..
+            } = row
+            {
+                let mut parts = Vec::new();
+                if let Some(u) = user.as_ref() {
+                    parts.push(u.clone());
+                }
+                if let Some(h) = hostname.as_ref() {
+                    parts.push(if parts.is_empty() {
+                        h.clone()
+                    } else {
+                        format!("@{h}")
+                    });
+                }
+                if let Some(p) = port {
+                    parts.push(format!(":{p}"));
+                }
+                self.import_all_row_states
+                    .entry(alias.clone())
+                    .or_default();
+                entries.push(ImportAllEntry {
+                    alias,
+                    subtitle: parts.concat(),
+                    already_added: added,
+                    selected: !added,
+                });
+            }
+        }
+        self.import_all = Some(ImportAllState { entries });
+        ctx.notify();
+    }
+
+    fn on_toggle_import_all_entry(&mut self, alias: &str, ctx: &mut ViewContext<Self>) {
+        if let Some(state) = self.import_all.as_mut() {
+            if let Some(entry) = state
+                .entries
+                .iter_mut()
+                .find(|e| e.alias == alias && !e.already_added)
+            {
+                entry.selected = !entry.selected;
+                ctx.notify();
+            }
+        }
+    }
+
+    /// Import every checked, not-already-imported candidate in one batch. Unlike
+    /// single import, no editor pane is opened per node.
+    fn on_confirm_import_all(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(state) = self.import_all.take() else {
+            return;
+        };
+        let aliases = state.selected_aliases();
+        if aliases.is_empty() {
+            ctx.notify();
+            return;
+        }
+        let path_display = self
+            .candidates
+            .read(ctx, |vm, _| vm.path_display())
+            .unwrap_or_default();
+        let candidates: Vec<warp_ssh_manager::SshConfigCandidate> = self.candidates.read(ctx, |vm, _| {
+            aliases
+                .iter()
+                .filter_map(|a| vm.find_candidate(a).cloned())
+                .collect()
+        });
+
+        let parent = self.parent_for_new_node();
+        let result = warp_ssh_manager::with_conn(|conn| {
+            for c in &candidates {
+                let name = unique_name(conn, parent.as_deref(), &c.alias)?;
+                let info = imported_server_info(c, &path_display);
+                SshRepository::create_server(conn, parent.as_deref(), &name, &info)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            log::error!("ssh_manager: import all failed: {e:?}");
+            ctx.emit(SshManagerPanelEvent::PersistenceError(e.to_string()));
+            return;
+        }
+
+        self.refresh_tree(ctx);
+        SshTreeChangedNotifier::handle(ctx).update(ctx, |_, ctx| {
+            ctx.emit(SshTreeChangedEvent::TreeChanged);
+        });
+        ctx.notify();
+    }
+
+    fn on_dismiss_import_all(&mut self, ctx: &mut ViewContext<Self>) {
+        self.import_all = None;
         ctx.notify();
     }
 
@@ -1180,6 +1305,17 @@ impl SshManagerPanel {
 
         let mut col = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
+        // Whether any candidate is still importable — gates the "Import all…"
+        // trigger row. When the section is collapsed `rows` only has the header,
+        // so this is naturally false.
+        let has_importable = rows
+            .iter()
+            .any(|r| matches!(r, CandidateRow::Candidate { added: false, .. }));
+        // Action rows (Sync / Import all) live under the header as full-width
+        // rows — never as inline buttons in the header's `MainAxisSize::Max`
+        // row. They show only when the section is expanded (body visible).
+        let expanded = self.candidates.as_ref(app).is_expanded();
+
         for row in rows {
             match row {
                 CandidateRow::Header {
@@ -1194,6 +1330,12 @@ impl SshManagerPanel {
                         appearance,
                         app,
                     ));
+                    if expanded {
+                        col.add_child(self.render_sync_trigger(appearance));
+                        if has_importable {
+                            col.add_child(self.render_import_all_trigger(appearance));
+                        }
+                    }
                 }
                 CandidateRow::NotFound { path_display } => {
                     col.add_child(self.render_candidates_message(
@@ -1328,29 +1470,6 @@ impl SshManagerPanel {
             refresh_icon
         };
 
-        // Sync button — re-reads the config and re-applies it (one-way) to nodes
-        // imported from `~/.ssh/config`. A download glyph signals "config → node".
-        let sync_state = self.candidates_sync_btn.clone();
-        let sync_icon = ConstrainedBox::new(
-            crate::ui_components::icons::Icon::Download
-                .to_warpui_icon(icon_color)
-                .finish(),
-        )
-        .with_width(ITEM_ICON_SIZE)
-        .with_height(ITEM_ICON_SIZE)
-        .finish();
-        let sync_btn = Hoverable::new(sync_state, move |_| {
-            Container::new(sync_icon)
-                .with_uniform_padding(2.0)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.0)))
-                .finish()
-        })
-        .with_cursor(Cursor::PointingHand)
-        .on_click(|ctx, _, _| {
-            ctx.dispatch_typed_action(SshManagerPanelAction::SyncWithConfig);
-        })
-        .finish();
-
         // 整行:chevron + 标签(吃中间空间)+ count + Refresh 按钮。
         // 使用 MainAxisSize::Max 让整行填满面板宽度,消除右侧留白。
         let row = Flex::row()
@@ -1364,7 +1483,6 @@ impl SshManagerPanel {
                     .with_width(8.0)
                     .finish(),
             )
-            .with_child(sync_btn)
             .with_child(refresh_btn)
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::Start)
@@ -2149,6 +2267,287 @@ impl SshManagerPanel {
             .finish()
     }
 
+    /// A full-width "Sync imported hosts with ~/.ssh/config" row under the
+    /// Candidates header. Kept out of the header's `MainAxisSize::Max` row to
+    /// avoid the layout overflow that crashed when it was an inline icon button.
+    fn render_sync_trigger(
+        &self,
+        appearance: &warp_core::ui::appearance::Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let color = theme.sub_text_color(theme.background());
+        let icon = ConstrainedBox::new(
+            crate::ui_components::icons::Icon::Download
+                .to_warpui_icon(color)
+                .finish(),
+        )
+        .with_width(ITEM_ICON_SIZE)
+        .with_height(ITEM_ICON_SIZE)
+        .finish();
+        let label = Text::new_inline(
+            crate::t!("workspace-left-panel-ssh-manager-candidates-sync"),
+            appearance.ui_font_family(),
+            appearance.ui_font_body(),
+        )
+        .with_color(color.into())
+        .finish();
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(ITEM_ICON_TEXT_SPACING)
+            .with_child(icon)
+            .with_child(label)
+            .finish();
+        Hoverable::new(self.candidates_sync_btn.clone(), move |_| {
+            Container::new(row)
+                .with_padding_top(ITEM_PADDING_VERTICAL)
+                .with_padding_bottom(ITEM_PADDING_VERTICAL)
+                .with_padding_left(ITEM_PADDING_HORIZONTAL + FOLDER_DEPTH_INDENT)
+                .with_padding_right(ITEM_PADDING_HORIZONTAL)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(SshManagerPanelAction::SyncWithConfig);
+        })
+        .finish()
+    }
+
+    /// A full-width "Import all…" row shown under the Candidates header when at
+    /// least one host is still importable. Opens the selection modal.
+    fn render_import_all_trigger(
+        &self,
+        appearance: &warp_core::ui::appearance::Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let accent = theme.accent();
+        let icon = ConstrainedBox::new(
+            crate::ui_components::icons::Icon::Plus
+                .to_warpui_icon(accent)
+                .finish(),
+        )
+        .with_width(ITEM_ICON_SIZE)
+        .with_height(ITEM_ICON_SIZE)
+        .finish();
+        let label = Text::new_inline(
+            crate::t!("workspace-left-panel-ssh-manager-import-all"),
+            appearance.ui_font_family(),
+            appearance.ui_font_body(),
+        )
+        .with_color(accent.into())
+        .finish();
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(ITEM_ICON_TEXT_SPACING)
+            .with_child(icon)
+            .with_child(label)
+            .finish();
+        Hoverable::new(self.import_all_open_btn.clone(), move |_| {
+            Container::new(row)
+                .with_padding_top(ITEM_PADDING_VERTICAL)
+                .with_padding_bottom(ITEM_PADDING_VERTICAL)
+                .with_padding_left(ITEM_PADDING_HORIZONTAL + FOLDER_DEPTH_INDENT)
+                .with_padding_right(ITEM_PADDING_HORIZONTAL)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(SshManagerPanelAction::OpenImportAll);
+        })
+        .finish()
+    }
+
+    /// Render the "Import all" modal: a fixed-width centered card with a
+    /// checkbox row per candidate and Import / Cancel actions. The card width is
+    /// fixed (not max) so it never depends on an unbounded incoming constraint.
+    fn render_import_all_modal(
+        &self,
+        state: &ImportAllState,
+        appearance: &warp_core::ui::appearance::Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let main = theme.main_text_color(theme.background());
+        let muted = theme.sub_text_color(theme.background());
+
+        let mut body = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(4.0);
+        body.add_child(
+            Text::new_inline(
+                crate::t!("workspace-left-panel-ssh-manager-import-all-title"),
+                appearance.ui_font_family(),
+                appearance.ui_font_subheading(),
+            )
+            .with_color(main.into())
+            .finish(),
+        );
+
+        if state.entries.is_empty() {
+            body.add_child(
+                Text::new_inline(
+                    crate::t!("workspace-left-panel-ssh-manager-import-all-empty"),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_body(),
+                )
+                .with_color(muted.into())
+                .finish(),
+            );
+        } else {
+            for entry in &state.entries {
+                body.add_child(self.render_import_all_row(entry, appearance));
+            }
+        }
+
+        let selected = state.selected_aliases().len();
+        let mut buttons = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_alignment(MainAxisAlignment::End)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_spacing(8.0)
+            .with_child(self.render_sync_button(
+                &crate::t!("workspace-left-panel-ssh-manager-import-all-cancel"),
+                false,
+                appearance,
+                SshManagerPanelAction::DismissImportAll,
+                self.import_all_cancel_btn.clone(),
+            ));
+        if selected > 0 {
+            let label = format!(
+                "{} ({selected})",
+                crate::t!("workspace-left-panel-ssh-manager-import-all-confirm")
+            );
+            buttons.add_child(self.render_sync_button(
+                &label,
+                true,
+                appearance,
+                SshManagerPanelAction::ConfirmImportAll,
+                self.import_all_confirm_btn.clone(),
+            ));
+        }
+
+        let content = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(12.0)
+            .with_child(
+                ConstrainedBox::new(body.finish())
+                    .with_max_height(360.0)
+                    .finish(),
+            )
+            .with_child(buttons.finish())
+            .finish();
+
+        let card = Container::new(content)
+            .with_background(theme.surface_1())
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.0)))
+            .with_border(Border::all(1.0).with_border_fill(theme.surface_3()))
+            .with_uniform_padding(16.0)
+            .finish();
+        let sized = ConstrainedBox::new(card).with_width(380.0).finish();
+
+        Dismiss::new(sized)
+            .prevent_interaction_with_other_elements()
+            .on_dismiss(|ctx, _| {
+                ctx.dispatch_typed_action(SshManagerPanelAction::DismissImportAll);
+            })
+            .finish()
+    }
+
+    /// One checkbox row in the "Import all" modal. Already-imported candidates
+    /// render dimmed and are not toggleable.
+    fn render_import_all_row(
+        &self,
+        entry: &ImportAllEntry,
+        appearance: &warp_core::ui::appearance::Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let main = theme.main_text_color(theme.background());
+        let muted = theme.sub_text_color(theme.background());
+        let accent = theme.accent();
+        let label_color = if entry.already_added { muted } else { main };
+
+        // Checkbox: accent-filled with a check when selected/added, otherwise an
+        // empty bordered box.
+        let checked = entry.selected || entry.already_added;
+        let box_inner: Box<dyn Element> = if checked {
+            ConstrainedBox::new(
+                crate::ui_components::icons::Icon::Check
+                    .to_warpui_icon(theme.background())
+                    .finish(),
+            )
+            .with_width(12.0)
+            .with_height(12.0)
+            .finish()
+        } else {
+            Empty::new().finish()
+        };
+        let mut checkbox = Container::new(box_inner)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.0)));
+        if checked {
+            checkbox = checkbox.with_background(accent);
+        } else {
+            checkbox = checkbox.with_border(Border::all(1.0).with_border_fill(muted.into_solid()));
+        }
+        let checkbox = ConstrainedBox::new(checkbox.finish())
+            .with_width(16.0)
+            .with_height(16.0)
+            .finish();
+
+        let mut text_col = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(
+                Text::new_inline(
+                    entry.alias.clone(),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_body(),
+                )
+                .with_color(label_color.into())
+                .finish(),
+            );
+        if !entry.subtitle.is_empty() {
+            text_col.add_child(
+                Text::new_inline(
+                    entry.subtitle.clone(),
+                    appearance.ui_font_family(),
+                    appearance.ui_font_body(),
+                )
+                .with_color(muted.into())
+                .finish(),
+            );
+        }
+
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_spacing(ITEM_ICON_TEXT_SPACING)
+            .with_child(checkbox)
+            .with_child(warpui::elements::Shrinkable::new(1.0, text_col.finish()).finish())
+            .finish();
+
+        let state = self
+            .import_all_row_states
+            .get(&entry.alias)
+            .cloned()
+            .unwrap_or_default();
+        let alias = entry.alias.clone();
+        Hoverable::new(state, move |_| {
+            Container::new(row)
+                .with_padding_top(ITEM_PADDING_VERTICAL)
+                .with_padding_bottom(ITEM_PADDING_VERTICAL)
+                .with_padding_left(4.0)
+                .with_padding_right(4.0)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.0)))
+                .finish()
+        })
+        .with_cursor(Cursor::PointingHand)
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(SshManagerPanelAction::ToggleImportAllEntry {
+                alias: alias.clone(),
+            });
+        })
+        .finish()
+    }
+
     /// A single modal button. `is_accent` paints the primary (Apply) action.
     fn render_sync_button(
         &self,
@@ -2259,6 +2658,12 @@ impl TypedActionView for SshManagerPanel {
             SshManagerPanelAction::SyncWithConfig => self.on_sync_with_config(ctx),
             SshManagerPanelAction::ApplySync => self.on_apply_sync(ctx),
             SshManagerPanelAction::DismissSyncPreview => self.on_dismiss_sync_preview(ctx),
+            SshManagerPanelAction::OpenImportAll => self.on_open_import_all(ctx),
+            SshManagerPanelAction::ToggleImportAllEntry { alias } => {
+                self.on_toggle_import_all_entry(alias, ctx)
+            }
+            SshManagerPanelAction::ConfirmImportAll => self.on_confirm_import_all(ctx),
+            SshManagerPanelAction::DismissImportAll => self.on_dismiss_import_all(ctx),
         }
     }
 }
@@ -2332,6 +2737,15 @@ impl View for SshManagerPanel {
         // Sync confirmation modal overlay (centered).
         if let Some(preview) = self.sync_preview.as_ref() {
             let modal = self.render_sync_modal(preview, appearance);
+            let mut stack = Stack::new();
+            stack.add_child(content);
+            stack.add_overlay_child(Align::new(modal).finish());
+            content = stack.finish();
+        }
+
+        // "Import all" selection modal overlay (centered).
+        if let Some(state) = self.import_all.as_ref() {
+            let modal = self.render_import_all_modal(state, appearance);
             let mut stack = Stack::new();
             stack.add_child(content);
             stack.add_overlay_child(Align::new(modal).finish());
@@ -2429,6 +2843,42 @@ fn compute_depths(nodes: &[SshNode]) -> HashMap<String, usize> {
 /// 一次性拉所有 ssh_servers 行的 `host` 字段。失败时返回空 Vec —— 候选区段的
 /// "Added" 徽章在 SQLite 临时挂掉时就当成"没有任何已导入项"渲染,不至于让
 /// 整个面板崩。
+/// Build the `SshServerInfo` for a `~/.ssh/config` candidate, with one-way sync
+/// provenance recorded. Shared by single-import and bulk "import all".
+///
+/// Field mapping (PRODUCT.md decision I/J/K): `host = alias` (keeps OpenSSH
+/// alias semantics), `port = candidate.port.unwrap_or(22)`, `auth_type = Key`
+/// when an IdentityFile is present else `Password`, notes record the source path.
+fn imported_server_info(c: &warp_ssh_manager::SshConfigCandidate, path_display: &str) -> SshServerInfo {
+    let auth_type = if c.identity_file.is_some() {
+        AuthType::Key
+    } else {
+        AuthType::Password
+    };
+    SshServerInfo {
+        node_id: String::new(),
+        host: c.alias.clone(),
+        port: c.port.unwrap_or(22),
+        username: c.user.clone().unwrap_or_default(),
+        auth_type,
+        key_path: c
+            .identity_file
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        credential_id: None,
+        startup_command: None,
+        notes: Some(format!("Imported from {path_display}")),
+        last_connected_at: None,
+        advanced: warp_ssh_manager::SshAdvancedConfig {
+            port_forwards: Vec::new(),
+            imported_from: Some(warp_ssh_manager::ImportProvenance {
+                path: path_display.to_string(),
+                alias: c.alias.clone(),
+            }),
+        },
+    }
+}
+
 /// Localized label for a synced field, used in the modal's "field: old → new"
 /// lines.
 fn sync_field_label(field: warp_ssh_manager::SyncField) -> String {

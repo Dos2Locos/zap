@@ -2741,6 +2741,16 @@ workspace-left-panel-ssh-manager-sync-apply = 適用
 workspace-left-panel-ssh-manager-sync-cancel = キャンセル
 # TODO: review
 workspace-left-panel-ssh-manager-sync-close = 閉じる
+# TODO: review
+workspace-left-panel-ssh-manager-import-all = すべてインポート…
+# TODO: review
+workspace-left-panel-ssh-manager-import-all-title = ~/.ssh/config からインポート
+# TODO: review
+workspace-left-panel-ssh-manager-import-all-empty = インポート可能なホストがありません。
+# TODO: review
+workspace-left-panel-ssh-manager-import-all-confirm = インポート
+# TODO: review
+workspace-left-panel-ssh-manager-import-all-cancel = キャンセル
 workspace-left-panel-ssh-manager-tab-general = 一般
 workspace-left-panel-ssh-manager-tab-forwarding = ポート転送
 workspace-left-panel-ssh-manager-forward-kind-local = ローカル
