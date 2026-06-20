@@ -83,7 +83,9 @@ pub fn connect_from_server(
 
 fn resolve_sftp_auth(server: &SshServerInfo) -> Result<ResolvedSshAuth, SftpOpsError> {
     warp_ssh_manager::with_conn(|conn| Ok(SshRepository::resolve_server_auth(conn, server)?))
-        .map_err(|e| SftpOpsError::NoCredentials(format!("解析认证失败: {e}")))
+        .map_err(|e| {
+            SftpOpsError::NoCredentials(crate::t!("sftp-ops-resolve-auth-failed", error = e.to_string()))
+        })
 }
 
 /// 列出远程目录内容，转换为 UI 层 FileEntry
@@ -275,8 +277,10 @@ pub fn upload_file_streaming(
             if let Err(e) = rename_result {
                 // rename 失败时保留远程临时文件，避免数据丢失
                 let temp_display = temp_remote_path.display();
-                return Err(SftpOpsError::Operation(format!(
-                    "重命名远程临时文件失败: {e}。临时文件: {temp_display}"
+                return Err(SftpOpsError::Operation(crate::t!(
+                    "sftp-ops-rename-remote-temp-failed",
+                    error = e.to_string(),
+                    temp = temp_display.to_string()
                 )));
             }
         }
@@ -348,8 +352,10 @@ pub fn download_file_streaming(
             if let Err(e) = fs::rename(&temp_local_path, local_path) {
                 // rename 失败时保留本地临时文件，避免数据丢失
                 let temp_display = temp_local_path.display();
-                return Err(SftpOpsError::LocalIo(format!(
-                    "重命名失败: {e}。已下载的临时文件保留在: {temp_display}"
+                return Err(SftpOpsError::LocalIo(crate::t!(
+                    "sftp-ops-rename-local-temp-failed",
+                    error = e.to_string(),
+                    temp = temp_display.to_string()
                 )));
             }
         }
@@ -473,7 +479,9 @@ fn build_auth_method(
         AuthType::Password | AuthType::OneKey => {
             let password = secret_store
                 .get(&resolved_auth.secret_lookup_id, resolved_auth.secret_kind)
-                .map_err(|e| SftpOpsError::NoCredentials(format!("读取密码失败: {e}")))?;
+                .map_err(|e| {
+                    SftpOpsError::NoCredentials(crate::t!("sftp-ops-read-password-failed", error = e.to_string()))
+                })?;
             match password {
                 Some(password) => Ok(AuthMethod::Password {
                     password: password.to_string(),
@@ -485,7 +493,7 @@ fn build_auth_method(
         }
         AuthType::Key => {
             let key_path = resolved_auth.key_path.as_ref().ok_or_else(|| {
-                SftpOpsError::NoCredentials("密钥认证但未指定密钥路径".to_string())
+                SftpOpsError::NoCredentials(crate::t!("sftp-ops-key-auth-no-key-path"))
             })?;
             let expanded = shellexpand_path(key_path);
             let passphrase = secret_store

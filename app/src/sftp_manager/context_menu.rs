@@ -46,23 +46,23 @@ struct MenuItem {
 fn build_file_menu_items(entry_index: usize) -> Vec<MenuItem> {
     vec![
         MenuItem {
-            label: String::from("打开"),
+            label: crate::t!("sftp-menu-open"),
             action: SftpBrowserAction::OpenEntry(entry_index),
         },
         MenuItem {
-            label: String::from("下载"),
+            label: crate::t!("sftp-menu-download"),
             action: SftpBrowserAction::DownloadEntry(entry_index),
         },
         MenuItem {
-            label: String::from("重命名"),
+            label: crate::t!("sftp-menu-rename"),
             action: SftpBrowserAction::RenameEntry(entry_index),
         },
         MenuItem {
-            label: String::from("删除"),
+            label: crate::t!("sftp-menu-delete"),
             action: SftpBrowserAction::DeleteEntry(entry_index),
         },
         MenuItem {
-            label: String::from("详细信息"),
+            label: crate::t!("sftp-menu-details"),
             action: SftpBrowserAction::DetailsEntry(entry_index),
         },
     ]
@@ -234,13 +234,20 @@ mod tests {
         assert_eq!(items.len(), 5, "应有 5 个菜单项");
     }
 
-    /// 测试菜单项标签正确
+    /// 测试菜单项标签正确。标签经由 `crate::t!` 本地化,因此用相同的 key 取期望值
+    /// (与 loader 是否初始化无关),验证每一项绑定到正确的翻译 key。
     #[test]
     fn test_build_file_menu_items_labels() {
         let items = build_file_menu_items(0);
-        let expected_labels = ["打开", "下载", "重命名", "删除", "详细信息"];
+        let expected_labels = [
+            crate::t!("sftp-menu-open"),
+            crate::t!("sftp-menu-download"),
+            crate::t!("sftp-menu-rename"),
+            crate::t!("sftp-menu-delete"),
+            crate::t!("sftp-menu-details"),
+        ];
         for (item, expected) in items.iter().zip(expected_labels.iter()) {
-            assert_eq!(&item.label.as_str(), expected, "标签应为 {}", expected);
+            assert_eq!(item.label.as_str(), expected.as_str(), "标签应为 {expected}");
         }
     }
 
