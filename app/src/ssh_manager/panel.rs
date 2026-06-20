@@ -1676,19 +1676,17 @@ impl SshManagerPanel {
             .cloned()
             .unwrap_or_default();
         let alias_for_connect = alias.to_string();
-        let connect_label = Text::new_inline(
-            crate::t!("workspace-left-panel-ssh-manager-connect"),
-            appearance.ui_font_family(),
-            appearance.ui_font_body(),
+        let connect_icon = ConstrainedBox::new(
+            crate::ui_components::icons::Icon::Play
+                .to_warpui_icon(theme.sub_text_color(theme.background()))
+                .finish(),
         )
-        .with_color(theme.sub_text_color(theme.background()).into())
+        .with_width(ITEM_ICON_SIZE)
+        .with_height(ITEM_ICON_SIZE)
         .finish();
         let connect_btn = Hoverable::new(connect_state, move |_| {
-            Container::new(connect_label)
-                .with_padding_left(8.0)
-                .with_padding_right(8.0)
-                .with_padding_top(2.0)
-                .with_padding_bottom(2.0)
+            Container::new(connect_icon)
+                .with_uniform_padding(2.0)
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.0)))
                 .finish()
         })
@@ -1700,8 +1698,13 @@ impl SshManagerPanel {
         })
         .finish();
 
-        // 使用 MainAxisSize::Max 让候选行填满面板宽度,消除右侧留白。
-        let row = Flex::row()
+        // Tabla de tres columnas: | alias/identidad | ▶ conectar | + importar |.
+        // La columna de identidad (indent + icono + nombre) va a la izquierda y
+        // las acciones a la derecha. Usamos SpaceBetween entre ambos bloques para
+        // que la columna de acciones quede alineada a la derecha en todas las
+        // filas, dando aspecto de tabla. (Evitamos Stretch/Expanded a propósito:
+        // las acciones son bloques Min, sin riesgo de tamaño infinito.)
+        let identity = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(ITEM_ICON_TEXT_SPACING)
             .with_child(
@@ -1711,13 +1714,20 @@ impl SshManagerPanel {
             )
             .with_child(icon_el)
             .with_child(label_block)
-            .with_child(
-                ConstrainedBox::new(Empty::new().finish())
-                    .with_width(8.0)
-                    .finish(),
-            )
+            .with_main_axis_size(MainAxisSize::Min)
+            .finish();
+        let actions = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(ITEM_ICON_TEXT_SPACING)
             .with_child(connect_btn)
             .with_child(trailing)
+            .with_main_axis_size(MainAxisSize::Min)
+            .finish();
+        let row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_child(identity)
+            .with_child(actions)
             .with_main_axis_size(MainAxisSize::Max)
             .finish();
 
