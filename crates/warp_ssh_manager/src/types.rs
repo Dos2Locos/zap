@@ -145,6 +145,87 @@ impl PortForward {
             PortForwardKind::Dynamic => "-D",
         }
     }
+
+    /// Render the forward as the **value of an `~/.ssh/config` directive**
+    /// (`LocalForward` / `RemoteForward` / `DynamicForward`). Unlike
+    /// [`Self::to_ssh_spec`] (which produces the colon-joined CLI `-L` form), the
+    /// config-file form separates the local and remote endpoints with a space:
+    /// `[bind:]port host:hostport` for Local/Remote, `[bind:]port` for Dynamic.
+    /// Returns `None` if required fields are missing.
+    pub fn to_config_spec(&self) -> Option<String> {
+        let local = if self.bind_host.is_empty() {
+            self.bind_port.to_string()
+        } else {
+            format!("{}:{}", self.bind_host, self.bind_port)
+        };
+        match self.kind {
+            PortForwardKind::Local | PortForwardKind::Remote => {
+                let target_host = self.target_host.as_deref()?;
+                let target_port = self.target_port?;
+                Some(format!("{local} {target_host}:{target_port}"))
+            }
+            PortForwardKind::Dynamic => Some(local),
+        }
+    }
+
+    /// Parse the value of an `~/.ssh/config` forward directive (see
+    /// [`Self::to_config_spec`]) back into a [`PortForward`]. Returns `None` when
+    /// the spec is malformed for the given `kind`.
+    ///
+    /// Accepted local-endpoint forms: `port` (bind host defaults to empty) and
+    /// `bind_address:port`. The remote endpoint (Local/Remote only) is
+    /// `host:hostport`; the host may itself contain colons (IPv6), so the port is
+    /// split from the right.
+    pub fn from_config_spec(kind: PortForwardKind, spec: &str) -> Option<Self> {
+        let spec = spec.trim();
+        let mut parts = spec.split_whitespace();
+        let local = parts.next()?;
+        let (bind_host, bind_port) = parse_endpoint(local)?;
+
+        match kind {
+            PortForwardKind::Local | PortForwardKind::Remote => {
+                let remote = parts.next()?;
+                if parts.next().is_some() {
+                    return None;
+                }
+                let (target_host, target_port) = parse_endpoint(remote)?;
+                if target_host.is_empty() {
+                    return None;
+                }
+                Some(Self {
+                    kind,
+                    bind_host,
+                    bind_port,
+                    target_host: Some(target_host),
+                    target_port: Some(target_port),
+                    description: None,
+                })
+            }
+            PortForwardKind::Dynamic => {
+                if parts.next().is_some() {
+                    return None;
+                }
+                Some(Self {
+                    kind,
+                    bind_host,
+                    bind_port,
+                    target_host: None,
+                    target_port: None,
+                    description: None,
+                })
+            }
+        }
+    }
+}
+
+/// Split an `[address:]port` endpoint into its address (possibly empty) and port.
+/// The port is taken from the rightmost colon so IPv6 literals in the address
+/// survive. Returns `None` if the port is missing or not a valid `u16`.
+fn parse_endpoint(s: &str) -> Option<(String, u16)> {
+    match s.rsplit_once(':') {
+        Some((host, port)) => Some((host.to_string(), port.parse().ok()?)),
+        None => Some((String::new(), s.parse().ok()?)),
+    }
 }
 
 /// Records where a node was imported from in `~/.ssh/config`, so it can later be
@@ -293,6 +374,88 @@ mod tests {
         let mut f = forward(PortForwardKind::Local);
         f.target_port = None;
         assert_eq!(f.to_ssh_spec(), None);
+    }
+
+    #[test]
+    fn config_spec_uses_space_separated_endpoints() {
+        assert_eq!(
+            forward(PortForwardKind::Local).to_config_spec().as_deref(),
+            Some("127.0.0.1:8000 example.com:80")
+        );
+        assert_eq!(
+            forward(PortForwardKind::Remote).to_config_spec().as_deref(),
+            Some("127.0.0.1:8000 example.com:80")
+        );
+    }
+
+    #[test]
+    fn config_spec_omits_empty_bind_host() {
+        let mut f = forward(PortForwardKind::Local);
+        f.bind_host = String::new();
+        assert_eq!(f.to_config_spec().as_deref(), Some("8000 example.com:80"));
+    }
+
+    #[test]
+    fn dynamic_config_spec_is_local_only() {
+        let mut f = forward(PortForwardKind::Dynamic);
+        f.target_host = None;
+        f.target_port = None;
+        assert_eq!(f.to_config_spec().as_deref(), Some("127.0.0.1:8000"));
+    }
+
+    #[test]
+    fn from_config_spec_parses_local_with_bind_host() {
+        let f =
+            PortForward::from_config_spec(PortForwardKind::Local, "127.0.0.1:8080 localhost:80")
+                .unwrap();
+        assert_eq!(f.bind_host, "127.0.0.1");
+        assert_eq!(f.bind_port, 8080);
+        assert_eq!(f.target_host.as_deref(), Some("localhost"));
+        assert_eq!(f.target_port, Some(80));
+    }
+
+    #[test]
+    fn from_config_spec_parses_local_without_bind_host() {
+        let f = PortForward::from_config_spec(PortForwardKind::Remote, "9999 db.internal:5432")
+            .unwrap();
+        assert_eq!(f.bind_host, "");
+        assert_eq!(f.bind_port, 9999);
+        assert_eq!(f.target_host.as_deref(), Some("db.internal"));
+        assert_eq!(f.target_port, Some(5432));
+    }
+
+    #[test]
+    fn from_config_spec_parses_dynamic() {
+        let f = PortForward::from_config_spec(PortForwardKind::Dynamic, "1080").unwrap();
+        assert_eq!(f.bind_host, "");
+        assert_eq!(f.bind_port, 1080);
+        assert_eq!(f.target_host, None);
+        assert_eq!(f.target_port, None);
+    }
+
+    #[test]
+    fn config_spec_round_trips() {
+        for (kind, spec) in [
+            (PortForwardKind::Local, "127.0.0.1:8080 localhost:80"),
+            (PortForwardKind::Remote, "9999 db.internal:5432"),
+            (PortForwardKind::Dynamic, "1080"),
+        ] {
+            let parsed = PortForward::from_config_spec(kind, spec).unwrap();
+            assert_eq!(parsed.to_config_spec().as_deref(), Some(spec));
+        }
+    }
+
+    #[test]
+    fn from_config_spec_rejects_malformed() {
+        assert!(PortForward::from_config_spec(PortForwardKind::Local, "8080").is_none());
+        assert!(PortForward::from_config_spec(PortForwardKind::Local, "").is_none());
+        assert!(
+            PortForward::from_config_spec(PortForwardKind::Dynamic, "1080 extra").is_none()
+        );
+        assert!(
+            PortForward::from_config_spec(PortForwardKind::Local, "notaport localhost:80")
+                .is_none()
+        );
     }
 
     #[test]

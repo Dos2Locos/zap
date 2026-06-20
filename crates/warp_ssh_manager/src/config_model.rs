@@ -103,6 +103,44 @@ pub struct HostView {
     pub description: Option<String>,
 }
 
+impl HostView {
+    /// Build the [`SshServerInfo`] used to open a connection (terminal or SFTP)
+    /// for this host. `alias` is the `Host` pattern and the keychain lookup id.
+    /// When `HostName` is omitted, the alias itself becomes the destination so
+    /// OpenSSH still resolves it. Auth is `Key` when an `IdentityFile` is present,
+    /// else `Password`; the actual secret lives in the keychain (by alias).
+    pub fn to_server_info(&self, alias: &str) -> crate::types::SshServerInfo {
+        use crate::types::{AuthType, PortForward, SshAdvancedConfig, SshServerInfo};
+        let key_path = self.identity_file.clone().filter(|p| !p.is_empty());
+        let auth_type = if key_path.is_some() {
+            AuthType::Key
+        } else {
+            AuthType::Password
+        };
+        let port_forwards = self
+            .forwards
+            .iter()
+            .filter_map(|f| PortForward::from_config_spec(f.kind, &f.spec))
+            .collect::<Vec<_>>();
+        SshServerInfo {
+            node_id: alias.to_string(),
+            host: self.hostname.clone().unwrap_or_else(|| alias.to_string()),
+            port: self.port.unwrap_or(22),
+            username: self.user.clone().unwrap_or_default(),
+            auth_type,
+            key_path,
+            credential_id: None,
+            startup_command: None,
+            notes: self.description.clone(),
+            last_connected_at: None,
+            advanced: SshAdvancedConfig {
+                port_forwards,
+                imported_from: None,
+            },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal document representation
 // ---------------------------------------------------------------------------
