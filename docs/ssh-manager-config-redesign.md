@@ -107,13 +107,85 @@ Al abrir la conexión, propagar el color (`#SCETags`) del host a la **pestaña d
 terminal**. Requiere mapa nombre→color y enganche con el sistema de pestañas
 (`app/src/tab.rs` / workspace). Color por defecto si el host no tiene etiqueta.
 
-### Fase 5 — Eliminar SQLite y código muerto
-`db.rs`, `repository.rs`, migraciones, `sync_config.rs`, `sync_provider.rs`,
-onekey, folders en DB. Ajustar tests.
+### Fase 5 — Eliminar SQLite y código muerto (REDEFINIDA)
+> **Cambio de rumbo (sesión 2026-06-21):** NO se elimina la sincronización. Se
+> **reorienta** para sincronizar el `~/.ssh/config` (ver "Rediseño del sync"
+> abajo). Por tanto SQLite se retira de la **capa de datos/panel**, pero el sync
+> deja de depender de SQLite en vez de desaparecer.
 
-### Fase 6 — Verificar
-`./script/run`: crear/editar/conectar, grupos, iconos, color de pestaña, file
-picker. Comprobar interoperabilidad: abrir el config en SCE tras editar en Zap.
+Eliminar: `db.rs`, `repository.rs`, migraciones, `sync_config.rs`, onekey,
+`candidates`, `on_clone_server`, `folders` en DB, variante `AuthType::OneKey`.
+Sustituir `DbVersionStore` por un `FileVersionStore` (versión + meta de sync en
+un fichero del directorio de datos de la app o en settings, sin SQLite).
+Repuntar a `~/.ssh/config`/Keychain los consumidores que aún leen SQLite:
+`search/command_palette/.../data_source.rs`, `pane_group/.../ssh_server_pane.rs`,
+`sftp_ops.rs`/`workspace/view.rs` (`resolve_server_auth` → Keychain por alias),
+e `integration_testing/ssh_manager/*`. Ajustar tests.
+
+---
+
+## Rediseño del sync: `~/.ssh/config` cifrado, estilo git
+
+> Acordado en sesión 2026-06-21 tras revisar `zap_sync`. Decisiones del usuario:
+> (1) merge de **texto completo línea a línea** (como git); (2) **cifrar** el
+> contenido; (3) sincronizar **config + contraseñas + ficheros de clave**, pero
+> (4) **reforzando antes el cifrado**; (5) **soportar varios backends** de
+> almacenamiento.
+
+### Motivación de seguridad (hallazgo clave)
+El cifrado actual (`zap_sync/crypto.rs`) deriva la clave como
+`SHA256(SHA256(token))`: **la clave de descifrado ES el token de GitHub**. Un
+token filtrado = todo el contenido descifrable. Inaceptable para material de
+clave privada. La seguridad del sync la determina el **cifrado en cliente**, no
+el backend: con E2EE de conocimiento cero, el almacén solo ve un blob opaco.
+
+### Fase 6 — Cripto E2EE v2 (fundacional, TDD)
+En `zap_sync/crypto.rs`, formato **versionado** (header con versión + parámetros):
+- **Passphrase independiente** elegida por el usuario (separa "acceso al almacén"
+  de "poder descifrar"); nunca se persiste en claro (en memoria con `Zeroizing`,
+  opcionalmente cacheada en el Keychain si el usuario lo elige). Verificador para
+  validar la passphrase al introducirla.
+- **KDF fuerte con sal aleatoria por blob**: Argon2id (recomendado; requiere
+  añadir crate `argon2`) o, sin dep nueva, PBKDF2-HMAC-SHA256 ~600k iter
+  (`pbkdf2` ya está en el árbol). Decisión menor pendiente.
+- **AEAD**: XChaCha20-Poly1305 (nonce de 24B, `chacha20poly1305` ya disponible)
+  o AES-256-GCM. Parámetros KDF (sal, iter) viajan en el header del blob.
+- **Migración** v1→v2: leer blobs v1 (token) para una última bajada; reescribir
+  en v2 al primer upload tras configurar passphrase.
+
+### Fase 7 — Abstracción de backend de almacenamiento
+Generalizar el actual `GistOps` a un trait `SyncBackend` neutro
+(`load`/`store`/`exists` de un blob por sección + metadatos de versión).
+Implementaciones: `GistBackend` (envuelve `GistClient`) y `FolderBackend`
+(lee/escribe un fichero cifrado en una carpeta configurable → iCloud Drive /
+Dropbox / Syncthing; sin API de terceros). `SyncEngine` genérico sobre
+`SyncBackend`. UI: selector de backend + config por backend (token+plataforma /
+ruta de carpeta).
+
+### Fase 8 — Sync del config con merge a 3 vías
+- **Base snapshot**: copia del config en la última sync correcta, en
+  `<app_data>/ssh_sync/config.base` (NO en `~/.ssh`). Permite distinguir "lo
+  cambié yo" de "lo cambió el otro equipo".
+- **`merge3(base, local, remote)`**: merge de texto a 3 vías (crate `diffy`,
+  recomendado; o `git2::merge_file` ya en el árbol). Limpio → escribe el
+  resultado (atómico, `0600`, backup), actualiza base, sube (versión+1). Conflicto
+  → marcadores `<<<<<<<`/`=======`/`>>>>>>>` para resolver en UI.
+- **UI de diff/conflictos**: mostrar el diff de lo que entraría y, en conflicto,
+  editor de resolución antes de escribir/subir.
+- Primera sync sin blob remoto → sube el local y fija `base = local`.
+
+### Fase 9 — Sync de secretos (bajo E2EE v2)
+- **Contraseñas**: por alias, Keychain → cifrar (v2) → sección del blob; al bajar,
+  descifrar → Keychain. Automático.
+- **Ficheros de clave privada**: **opt-in por clave**, con aviso explícito. Leer
+  bytes → cifrar (v2) → blob; al bajar, escribir con `0600` y confirmación. Nunca
+  bajo cripto v1.
+
+### Fase 10 — Verificar
+`./script/run`: crear/editar/conectar, grupos, color de pestaña, file picker.
+Sync: configurar passphrase + backend, upload/download entre dos perfiles, probar
+merge limpio y conflicto, contraseñas, y (opt-in) una clave. Interoperabilidad:
+abrir el config en SCE tras editar en Zap.
 
 ## Decisiones menores pendientes (no bloquean Fase 1)
 
