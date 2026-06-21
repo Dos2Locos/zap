@@ -3,15 +3,19 @@
 //! This module provides types for detecting and working with CLI-based AI agents
 //! like Claude Code, Gemini CLI, Codex, Amp, and Droid.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::path::Path;
 use ai::skills::SkillProvider;
 use enum_iterator::Sequence;
 use markdown_parser::parse_markdown;
 use pathfinder_color::ColorU;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use std::borrow::Cow;
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use warp_editor::content::{buffer::Buffer, markdown::MarkdownStyle};
 
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
@@ -590,22 +594,13 @@ pub struct CLIAgentInstallModel {
 impl CLIAgentInstallModel {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
         ctx.spawn(
-            async move {
-                enum_iterator::all::<CLIAgent>()
-                    .filter(|a| !matches!(a, CLIAgent::Unknown))
-                    .map(|a| (a, cli_agent_is_on_path(a)))
-                    .collect::<HashMap<CLIAgent, bool>>()
-            },
+            async move { scan_cli_agent_installations() },
             Self::on_scan_complete,
         );
         Self { cache: None }
     }
 
-    fn on_scan_complete(
-        &mut self,
-        results: HashMap<CLIAgent, bool>,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    fn on_scan_complete(&mut self, results: HashMap<CLIAgent, bool>, ctx: &mut ModelContext<Self>) {
         self.cache = Some(results.clone());
 
         // 自动同步到 per-agent 设置
@@ -641,7 +636,97 @@ impl Entity for CLIAgentInstallModel {
 
 impl SingletonEntity for CLIAgentInstallModel {}
 
-/// 同步 PATH 搜索，检测指定 agent 是否安装。仅供 `ctx.spawn` 异步任务内部使用。
+/// 同步 PATH 搜索，检测所有 agent 是否安装。仅供 `ctx.spawn` 异步任务内部使用。
+#[cfg(unix)]
+fn scan_cli_agent_installations() -> HashMap<CLIAgent, bool> {
+    let search_dirs = cli_agent_search_dirs().collect::<Vec<_>>();
+    enum_iterator::all::<CLIAgent>()
+        .filter(|a| !matches!(a, CLIAgent::Unknown))
+        .map(|a| (a, cli_agent_is_on_path_with_dirs(a, &search_dirs)))
+        .collect()
+}
+
+/// 同步 PATH 搜索，检测所有 agent 是否安装。仅供 `ctx.spawn` 异步任务内部使用。
+#[cfg(windows)]
+fn scan_cli_agent_installations() -> HashMap<CLIAgent, bool> {
+    enum_iterator::all::<CLIAgent>()
+        .filter(|a| !matches!(a, CLIAgent::Unknown))
+        .map(|a| (a, cli_agent_is_on_path(a)))
+        .collect()
+}
+
+#[cfg(unix)]
+fn cli_agent_is_on_path_with_dirs(agent: CLIAgent, search_dirs: &[PathBuf]) -> bool {
+    match agent {
+        CLIAgent::Unknown => false,
+        CLIAgent::CursorCli => is_on_path_in_dirs("cursor-agent", search_dirs),
+        CLIAgent::DeepSeek => {
+            is_on_path_in_dirs("deepseek", search_dirs)
+                || is_on_path_in_dirs("deepseek-tui", search_dirs)
+        }
+        other => is_on_path_in_dirs(other.command_prefix(), search_dirs),
+    }
+}
+
+/// 内联 PATH 搜索，零进程、零闪窗。
+#[cfg(unix)]
+fn is_on_path_in_dirs(cmd: &str, search_dirs: &[PathBuf]) -> bool {
+    search_dirs.iter().any(|dir| dir.join(cmd).is_file())
+}
+
+#[cfg(unix)]
+fn cli_agent_search_dirs() -> impl Iterator<Item = PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
+
+    extend_common_cli_dirs(&mut dirs);
+    dedupe_paths(dirs).into_iter()
+}
+
+#[cfg(unix)]
+fn extend_common_cli_dirs(dirs: &mut Vec<PathBuf>) {
+    dirs.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/homebrew/sbin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/local/sbin"),
+    ]);
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+
+    dirs.extend([
+        home.join(".cargo/bin"),
+        home.join(".bun/bin"),
+        home.join(".local/bin"),
+    ]);
+
+    if let Ok(node_versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        dirs.extend(
+            node_versions
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("bin")),
+        );
+    }
+}
+
+#[cfg(unix)]
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::with_capacity(paths.len());
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped
+}
+
+#[cfg(windows)]
 fn cli_agent_is_on_path(agent: CLIAgent) -> bool {
     match agent {
         CLIAgent::Unknown => false,
@@ -649,15 +734,6 @@ fn cli_agent_is_on_path(agent: CLIAgent) -> bool {
         CLIAgent::DeepSeek => is_on_path("deepseek") || is_on_path("deepseek-tui"),
         other => is_on_path(other.command_prefix()),
     }
-}
-
-/// 内联 PATH 搜索，零进程、零闪窗。
-#[cfg(unix)]
-fn is_on_path(cmd: &str) -> bool {
-    let Ok(path_var) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| dir.join(cmd).is_file())
 }
 
 #[cfg(windows)]
